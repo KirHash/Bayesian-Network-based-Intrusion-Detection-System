@@ -1,0 +1,65 @@
+# Caddy in front of the dashboard. Start it with "Start proxy.bat" (or
+# `bin\caddy.exe run --config Caddyfile`), after `python serve.py --behind-proxy`.
+#
+# Everything has a default for running on one machine; set these environment
+# variables for anything else:
+#
+#   IDS_PROXY_ADDRESS   what browsers use          default  localhost:8443
+#   IDS_UPSTREAM        where the dashboard runs   default  127.0.0.1:8000
+#   IDS_TLS             "internal" = a certificate from Caddy's own local CA,
+#                       or an email address to get a real Let's Encrypt
+#                       certificate for a public name                default  internal
+#   IDS_UPLOAD_LIMIT    largest request body       default  4GB
+#                       (keep at least as large as IDS_MAX_UPLOAD_MB)
+#   IDS_AUTO_HTTPS      "disable_redirects" = do not open port 80 (right for
+#                       a local setup); set to "on" for a public site, so
+#                       http:// is redirected to https://   default  disable_redirects
+#   IDS_BIND            interfaces to listen on    default  127.0.0.1 ::1
+#                       (this machine only. Both loopback addresses, because
+#                       "localhost" tries ::1 first and on Windows a refused
+#                       connection there costs two seconds. If this machine has
+#                       no IPv6, use 127.0.0.1. Use 0.0.0.0 to serve the
+#                       network, and then read "Serving beyond this machine"
+#                       in the README.)
+{
+	# no admin API on a network port: nothing here needs it
+	admin off
+
+	auto_https {$IDS_AUTO_HTTPS:disable_redirects}
+
+	# HTTP/1.1 and HTTP/2 only. HTTP/3 needs a UDP port next to the TCP one, which
+	# Windows can reserve (Hyper-V / WSL) and which firewalls ask about; the dashboard
+	# gains nothing from it.
+	servers {
+		protocols h1 h2
+	}
+
+	# do not touch the system certificate store; trust the local CA yourself
+	# (bin\caddy.exe trust) if you want browsers to accept the local certificate
+	skip_install_trust
+}
+
+https://{$IDS_PROXY_ADDRESS:localhost:8443} {
+	bind {$IDS_BIND:127.0.0.1 ::1}
+
+	tls {$IDS_TLS:internal}
+
+	# do not announce the software in every response
+	header -Server
+
+	request_body {
+		max_size {$IDS_UPLOAD_LIMIT:4GB}
+	}
+
+	reverse_proxy {$IDS_UPSTREAM:127.0.0.1:8000} {
+		# Pass bytes through as they arrive. Dataset uploads stream to disk and
+		# the live dashboard feed is a WebSocket; neither should be buffered.
+		flush_interval -1
+
+		transport http {
+			# a multi-gigabyte upload takes minutes
+			read_timeout 1h
+			write_timeout 1h
+		}
+	}
+}

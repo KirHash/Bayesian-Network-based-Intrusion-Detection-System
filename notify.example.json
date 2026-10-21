@@ -1,0 +1,19 @@
+{
+  "min_risk": "High",
+  "sources": ["capture", "api"],
+  "window_seconds": 10,
+  "base_url": "http://127.0.0.1:8000",
+  "webhook": {
+    "format": "slack",
+    "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+  },
+  "email": {
+    "host": "smtp.example.com",
+    "port": 587,
+    "starttls": true,
+    "username": "ids@example.com",
+    "password_env": "IDS_SMTP_PASSWORD",
+    "from": "ids@example.com",
+    "to": ["soc@example.com"]
+  }
+}

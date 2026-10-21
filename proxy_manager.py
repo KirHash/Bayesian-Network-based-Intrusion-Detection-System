@@ -1,0 +1,1051 @@
+"""
+Runs a reverse proxy (Caddy or nginx) in front of the dashboard, controlled
+from the dashboard.
+
+What it does for the chosen engine:
+
+    install   download the release and verify it first: Caddy's SHA-512
+              against the release's checksum file, nginx's PGP signature with
+              GnuPG. A verified binary's hash is recorded and checked again
+              before every start.
+    configure write the configuration from the settings saved in the dashboard
+    run       start / stop / restart, one process tracked by a pid file, so it
+              keeps running when the dashboard restarts
+    inspect   status, a test request through the proxy, the log, the
+              certificate
+
+The proxy is installed under proxy/ in the project, never system-wide, and
+needs no administrator rights.
+"""
+import hashlib
+import ipaddress
+import json
+import os
+import platform
+import re
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+import zipfile
+from datetime import datetime
+from pathlib import Path
+
+import psutil
+
+HERE = Path(__file__).resolve().parent
+
+ENGINES = ("caddy", "nginx")
+
+CADDY_RELEASES = "https://github.com/caddyserver/caddy/releases"
+
+NGINX_SITE = "https://nginx.org"
+
+DEFAULTS = {
+    "engine": "caddy",
+    "address": "localhost",
+    "port": 8443,
+    "expose": False,
+    "tls": "internal",
+    "cert": None,
+    "key": None,
+    "autostart": False
+}
+
+LOOPBACK = ["127.0.0.1", "::1"]
+
+HOSTNAME = re.compile(r"^(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
+
+EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+START_WAIT = 15.0
+
+
+class ProxyError(Exception):
+    """Something to tell the user, in plain words."""
+
+
+def proxy_dir():
+    return Path(os.environ.get("IDS_PROXY_DIR") or HERE / "proxy")
+
+
+def bin_dir():
+    return Path(os.environ.get("IDS_PROXY_BIN") or proxy_dir() / "bin")
+
+
+def run_dir():
+    return proxy_dir() / "run"
+
+
+def exe(name):
+    return name + (".exe" if os.name == "nt" else "")
+
+
+def slash(path):
+    """nginx wants forward slashes, even on Windows."""
+
+    return str(path).replace("\\", "/")
+
+
+def sha256_of(path):
+
+    h = hashlib.sha256()
+
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+
+    return h.hexdigest()
+
+
+# -- settings ----------------------------------------------------------------------
+
+def check_settings(incoming, current=None, cert_exists=lambda name: True):
+    """Validate what the dashboard sent; returns the settings to store."""
+
+    merged = {**DEFAULTS, **(current or {}), **incoming}
+
+    if merged["engine"] not in ENGINES:
+        raise ProxyError(f"engine must be one of {list(ENGINES)}")
+
+    address = str(merged["address"]).strip()
+
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        if not HOSTNAME.match(address):
+            raise ProxyError("the address must be a host name (like ids.example.com) or an IP address")
+
+    port = merged["port"]
+
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ProxyError("the port must be a number from 1 to 65535")
+
+    tls = merged["tls"]
+
+    if merged["engine"] == "caddy":
+
+        if tls != "internal" and not EMAIL.match(str(tls)):
+            raise ProxyError(
+                "TLS for Caddy is 'internal' (its own local certificate) or the "
+                "email address to use with Let's Encrypt"
+            )
+
+    else:
+
+        tls = "files" if merged["cert"] or merged["key"] else "self-signed"
+
+        if tls == "files":
+
+            for name in (merged["cert"], merged["key"]):
+
+                if not name:
+                    raise ProxyError("choose both a certificate and its key, or neither")
+
+                if not cert_exists(name):
+                    raise ProxyError(f"{name} is not in the certificates folder")
+
+    return {
+        "engine": merged["engine"], "address": address, "port": port,
+        "expose": bool(merged["expose"]), "tls": tls,
+        "cert": merged["cert"] if merged["engine"] == "nginx" else None,
+        "key": merged["key"] if merged["engine"] == "nginx" else None,
+        "autostart": bool(merged["autostart"])
+    }
+
+
+def bind_addresses(settings):
+
+    return ["0.0.0.0", "::"] if settings["expose"] else list(LOOPBACK)
+
+
+# -- configuration ----------------------------------------------------------------------
+
+def nginx_config(settings, upstream, upload_mb, paths):
+    """nginx.conf text for the settings. `paths` has install, run, cert, key."""
+
+    listens = "\n".join(
+        f"        listen {'[' + a + ']' if ':' in a else a}:{settings['port']} ssl;"
+        for a in bind_addresses(settings)
+    )
+
+    return f'''# Generated by the dashboard. Change the settings there, not this file.
+worker_processes 1;
+error_log "{slash(paths['run'])}/logs/error.log" warn;
+pid "{slash(paths['run'])}/nginx.pid";
+
+events {{
+    worker_connections 1024;
+}}
+
+http {{
+    include "{slash(paths['install'])}/conf/mime.types";
+    default_type application/octet-stream;
+
+    server_tokens off;
+    access_log off;
+
+    client_body_temp_path "{slash(paths['run'])}/temp/client_body";
+    proxy_temp_path "{slash(paths['run'])}/temp/proxy";
+
+    map $http_upgrade $connection_upgrade {{
+        default upgrade;
+        ''      close;
+    }}
+
+    server {{
+{listens}
+        http2 on;
+        server_name {settings['address']};
+
+        ssl_certificate "{slash(paths['cert'])}";
+        ssl_certificate_key "{slash(paths['key'])}";
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        # Uploads (datasets, pcaps) stream through and can be gigabytes: do not
+        # buffer the body, and allow as much as the dashboard does.
+        client_max_body_size {upload_mb}m;
+        proxy_request_buffering off;
+
+        location / {{
+            proxy_pass http://{upstream};
+            proxy_http_version 1.1;
+            proxy_buffering off;
+
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            # overwrite, never append: a client's own claim is not passed on
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            # the live dashboard feed is a WebSocket
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }}
+    }}
+}}
+'''
+
+
+def caddy_environment(settings, upstream, upload_mb, data_dir):
+    """Environment variables the shipped Caddyfile reads."""
+
+    public = settings["address"] not in ("localhost",) and not _is_loopback(settings["address"])
+
+    return {
+        "IDS_PROXY_ADDRESS": f"{settings['address']}:{settings['port']}",
+        "IDS_UPSTREAM": upstream,
+        "IDS_TLS": settings["tls"],
+        "IDS_UPLOAD_LIMIT": str(upload_mb * 1024 * 1024),
+        "IDS_BIND": " ".join(bind_addresses(settings)),
+        # a public site on the standard port also redirects http to https
+        "IDS_AUTO_HTTPS": "on" if public and settings["port"] == 443 else "disable_redirects",
+        "XDG_DATA_HOME": str(data_dir),
+        "XDG_CONFIG_HOME": str(data_dir)
+    }
+
+
+def _is_loopback(address):
+
+    try:
+        return ipaddress.ip_address(address).is_loopback
+    except ValueError:
+        return False
+
+
+# -- downloads -------------------------------------------------------------------------
+
+def fetch(url, timeout=60):
+
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return response.read()
+
+
+def download(url, destination, timeout=120):
+
+    with urllib.request.urlopen(url, timeout=timeout) as response, open(destination, "wb") as out:
+        shutil.copyfileobj(response, out, 1 << 20)
+
+
+def platform_names():
+    """(os, arch) in Caddy's naming."""
+
+    system = {"Windows": "windows", "Linux": "linux", "Darwin": "mac"}.get(platform.system())
+
+    machine = platform.machine().lower()
+
+    arch = "arm64" if machine in ("arm64", "aarch64") else "amd64"
+
+    if not system:
+        raise ProxyError(f"no download is offered for {platform.system()}")
+
+    return system, arch
+
+
+def latest_caddy_version(releases=None):
+
+    releases = releases or CADDY_RELEASES
+
+    request = urllib.request.Request(f"{releases}/latest", method="HEAD")
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        tag = response.geturl().rstrip("/").rsplit("/", 1)[-1]
+
+    return tag.lstrip("v")
+
+
+def verify_sha512(archive, checksums_text, name):
+    """The archive must hash to what the release's checksum file says."""
+
+    line = next((l for l in checksums_text.splitlines() if l.strip().endswith(name)), None)
+
+    if not line:
+        raise ProxyError(f"the release has no checksum for {name}")
+
+    expected = line.split()[0].lower()
+
+    h = hashlib.sha512()
+
+    with open(archive, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+
+    if h.hexdigest() != expected:
+        raise ProxyError(
+            "the download does not match the checksum the release published, so it "
+            "was not installed"
+        )
+
+
+def install_caddy(version=None, releases=None, target=None):
+    """Download, verify and unpack Caddy. Returns the manifest."""
+
+    releases = releases or CADDY_RELEASES
+
+    version = version or latest_caddy_version(releases)
+
+    system, arch = platform_names()
+
+    extension = "zip" if system == "windows" else "tar.gz"
+
+    name = f"caddy_{version}_{system}_{arch}.{extension}"
+
+    target = Path(target or bin_dir())
+
+    with tempfile.TemporaryDirectory(prefix="caddy-") as work:
+
+        archive = Path(work) / name
+
+        download(f"{releases}/download/v{version}/{name}", archive)
+
+        sums = fetch(f"{releases}/download/v{version}/caddy_{version}_checksums.txt").decode()
+
+        verify_sha512(archive, sums, name)
+
+        unpacked = Path(work) / "unpacked"
+
+        if extension == "zip":
+            with zipfile.ZipFile(archive) as z:
+                z.extractall(unpacked)
+        else:
+            with tarfile.open(archive) as t:
+                t.extractall(unpacked, filter="data")
+
+        found = next(unpacked.rglob(exe("caddy")), None)
+
+        if not found:
+            raise ProxyError("the download does not contain the caddy program")
+
+        target.mkdir(parents=True, exist_ok=True)
+
+        shutil.copy2(found, target / exe("caddy"))
+
+    if os.name != "nt":
+        (target / exe("caddy")).chmod(0o755)
+
+    manifest = {
+        "engine": "caddy", "version": version,
+        "verified": "SHA-512 matches the checksum published with the release",
+        "sha256": sha256_of(target / exe("caddy")),
+        "installed_at": datetime.now().isoformat(timespec="seconds")
+    }
+
+    (target / "caddy.json").write_text(json.dumps(manifest, indent=2))
+
+    return manifest
+
+
+def latest_nginx_stable(site=None):
+    """Highest version with an even minor number (nginx's stable line)."""
+
+    site = site or NGINX_SITE
+
+    page = fetch(f"{site}/download/").decode(errors="replace")
+
+    versions = sorted(
+        {tuple(map(int, m.groups())) for m in re.finditer(r"nginx-(\d+)\.(\d+)\.(\d+)\.zip", page)
+         if int(m.group(2)) % 2 == 0}
+    )
+
+    if not versions:
+        raise ProxyError("could not find a stable nginx version on nginx.org")
+
+    return ".".join(map(str, versions[-1]))
+
+
+def find_gpg():
+
+    candidates = [os.environ.get("IDS_GPG"), shutil.which("gpg")]
+
+    git = shutil.which("git")
+
+    if git:
+        candidates.append(str(Path(git).resolve().parents[1] / "usr" / "bin" / exe("gpg")))
+
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+
+    return None
+
+
+def verify_pgp(archive, signature, key_texts, gpg):
+    """Check a detached signature with a throwaway keyring. Returns the key fingerprint."""
+
+    with tempfile.TemporaryDirectory(prefix="gnupg-") as home:
+
+        base = [gpg, "--homedir", home, "--batch", "--no-tty"]
+
+        imported = 0
+
+        for text in key_texts:
+
+            key = Path(home) / f"key{imported}.asc"
+
+            key.write_bytes(text)
+
+            # A fresh keyring has no "ultimately trusted" key, which makes gpg
+            # exit with 2 even though the import worked; read its status lines
+            result = subprocess.run(
+                base + ["--status-fd", "1", "--import", str(key)],
+                capture_output=True, text=True
+            )
+
+            imported += "IMPORT_OK" in result.stdout
+
+        if not imported:
+            raise ProxyError("could not load the publisher's signing keys")
+
+        result = subprocess.run(
+            base + ["--status-fd", "1", "--verify", str(signature), str(archive)],
+            capture_output=True, text=True
+        )
+
+        if result.returncode != 0 or "GOODSIG" not in result.stdout:
+            raise ProxyError(
+                "the download's PGP signature is not valid, so it was not installed"
+            )
+
+        match = re.search(r"VALIDSIG ([0-9A-F]{40})", result.stdout)
+
+        return match.group(1) if match else "unknown"
+
+
+def install_nginx(version=None, site=None, target=None, allow_unverified=False, gpg=None):
+    """Download, verify and unpack nginx for Windows. Returns the manifest."""
+
+    if os.name != "nt":
+        found = shutil.which("nginx")
+
+        if not found:
+            raise ProxyError(
+                "nginx is not installed. Install it with your package manager "
+                "(for example: apt install nginx), then press Refresh."
+            )
+
+        return adopt_system_nginx(found, target)
+
+    site = site or NGINX_SITE
+
+    version = version or latest_nginx_stable(site)
+
+    name = f"nginx-{version}.zip"
+
+    target = Path(target or bin_dir())
+
+    # None: look for GnuPG; False: pretend there is none (tests, or on purpose)
+    gpg = find_gpg() if gpg is None else (gpg or None)
+
+    with tempfile.TemporaryDirectory(prefix="nginx-") as work:
+
+        archive = Path(work) / name
+
+        download(f"{site}/download/{name}", archive)
+
+        if gpg:
+
+            signature = Path(work) / (name + ".asc")
+
+            signature.write_bytes(fetch(f"{site}/download/{name}.asc"))
+
+            page = fetch(f"{site}/en/pgp_keys.html").decode(errors="replace")
+
+            keys = [fetch(site + path) for path in dict.fromkeys(re.findall(r'href="(/keys/[^"]+\.key)"', page))]
+
+            fingerprint = verify_pgp(archive, signature, keys, gpg)
+
+            verified = f"PGP signature verified with GnuPG (key {fingerprint})"
+
+        elif allow_unverified:
+            verified = (
+                "NOT verified: downloaded over HTTPS from nginx.org, but GnuPG is "
+                "not installed so the signature could not be checked"
+            )
+        else:
+            raise ProxyError(
+                "the download's PGP signature cannot be checked because GnuPG is not "
+                "installed. Install it (Git for Windows includes it) or choose to install "
+                "without the signature check."
+            )
+
+        with zipfile.ZipFile(archive) as z:
+
+            z.extractall(Path(work) / "unpacked")
+
+        top = next((Path(work) / "unpacked").iterdir())
+
+        destination = target / "nginx"
+
+        if destination.exists():
+            shutil.rmtree(destination)
+
+        target.mkdir(parents=True, exist_ok=True)
+
+        shutil.copytree(top, destination)
+
+    manifest = {
+        "engine": "nginx", "version": version, "verified": verified,
+        "sha256": sha256_of(destination / exe("nginx")),
+        "installed_at": datetime.now().isoformat(timespec="seconds")
+    }
+
+    (target / "nginx.json").write_text(json.dumps(manifest, indent=2))
+
+    return manifest
+
+
+def adopt_system_nginx(path, target=None):
+    """Use an nginx the system already has (Linux / macOS)."""
+
+    target = Path(target or bin_dir())
+
+    target.mkdir(parents=True, exist_ok=True)
+
+    version = subprocess.run([path, "-v"], capture_output=True, text=True).stderr.strip()
+
+    manifest = {
+        "engine": "nginx", "version": version, "path": path,
+        "verified": "installed by your system's package manager",
+        "sha256": sha256_of(path),
+        "installed_at": datetime.now().isoformat(timespec="seconds")
+    }
+
+    (target / "nginx.json").write_text(json.dumps(manifest, indent=2))
+
+    return manifest
+
+
+# -- the manager ------------------------------------------------------------------------
+
+class ProxyManager:
+
+    SETTING = "proxy_config"
+
+    def __init__(self, store, upstream, upload_mb, auth_required=lambda: True,
+                 cert_dir="certs"):
+        """
+        upstream():      "host:port" of the dashboard
+        upload_mb():     the dashboard's upload limit in MB
+        auth_required(): True once people have to sign in
+        """
+
+        self.store = store
+        self.upstream = upstream
+        self.upload_mb = upload_mb
+        self.auth_required = auth_required
+        self.cert_dir = Path(cert_dir)
+
+    # settings
+    def settings(self):
+
+        return {**DEFAULTS, **(self.store.get_setting(self.SETTING) or {})}
+
+    def save(self, incoming):
+
+        current = self.settings()
+
+        if self.running() and (incoming.get("engine") not in (None, current["engine"])):
+            raise ProxyError("stop the proxy before switching engine")
+
+        settings = check_settings(incoming, current, lambda n: (self.cert_dir / n).is_file())
+
+        self.store.set_setting(self.SETTING, settings)
+
+        return settings
+
+    # installation
+    def manifest(self, engine):
+
+        path = bin_dir() / f"{engine}.json"
+
+        if not path.exists():
+            return None
+
+        data = json.loads(path.read_text())
+
+        binary = self.binary(engine, data)
+
+        data["installed"] = bool(binary and Path(binary).exists())
+
+        data["intact"] = bool(
+            data["installed"] and sha256_of(binary) == data.get("sha256")
+        )
+
+        return data
+
+    def binary(self, engine, manifest=None):
+
+        if engine == "caddy":
+            return bin_dir() / exe("caddy")
+
+        manifest = manifest or {}
+
+        return manifest.get("path") or bin_dir() / "nginx" / exe("nginx")
+
+    def install(self, engine, **options):
+
+        if engine == "caddy":
+            return install_caddy()
+
+        if engine == "nginx":
+            return install_nginx(allow_unverified=options.get("allow_unverified", False))
+
+        raise ProxyError(f"unknown engine: {engine}")
+
+    def adopt_existing(self):
+        """Register binaries that are already in proxy/bin (for example from
+        install-caddy.ps1) so they are tracked and integrity-checked."""
+
+        for engine in ENGINES:
+
+            if (bin_dir() / f"{engine}.json").exists():
+                continue
+
+            binary = self.binary(engine)
+
+            if Path(binary).exists():
+
+                (bin_dir() / f"{engine}.json").write_text(json.dumps({
+                    "engine": engine, "version": "unknown",
+                    "verified": "found in the proxy folder; its checksum is recorded from now on",
+                    "sha256": sha256_of(binary),
+                    "installed_at": datetime.now().isoformat(timespec="seconds")
+                }, indent=2))
+
+    # running
+    def pid_file(self, engine):
+
+        return run_dir() / ("nginx/nginx.pid" if engine == "nginx" else "caddy.pid")
+
+    def pid(self, engine):
+
+        try:
+            pid = int(self.pid_file(engine).read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+        try:
+            process = psutil.Process(pid)
+
+            if engine in process.name().lower() and process.is_running():
+                return pid
+        except psutil.Error:
+            pass
+
+        return None
+
+    def running(self):
+
+        return self.pid(self.settings()["engine"]) is not None
+
+    def url(self, settings=None):
+
+        settings = settings or self.settings()
+
+        port = "" if settings["port"] == 443 else f":{settings['port']}"
+
+        return f"https://{settings['address']}{port}"
+
+    def status(self):
+
+        settings = self.settings()
+
+        engine = settings["engine"]
+
+        pid = self.pid(engine)
+
+        return {
+            "settings": settings,
+            "installed": {e: self.manifest(e) for e in ENGINES},
+            "gpg_available": find_gpg() is not None,
+            "running": pid is not None,
+            "pid": pid,
+            "url": self.url(settings),
+            "bind": bind_addresses(settings),
+            "upstream": self.upstream(),
+            "upload_mb": self.upload_mb(),
+            "certificates": sorted(
+                p.name for p in self.cert_dir.glob("*") if p.suffix.lower() in (".pem", ".crt", ".cer", ".key")
+            ) if self.cert_dir.is_dir() else []
+        }
+
+    def start(self):
+
+        settings = self.settings()
+
+        engine = settings["engine"]
+
+        manifest = self.manifest(engine)
+
+        if not manifest or not manifest["installed"]:
+            raise ProxyError(f"{engine} is not installed yet")
+
+        if not manifest["intact"]:
+            raise ProxyError(
+                f"the {engine} program no longer matches the checksum recorded when it was "
+                "installed, so it will not be started. Install it again."
+            )
+
+        if self.pid(engine):
+            return self.status()
+
+        if settings["expose"] and not self.auth_required():
+            raise ProxyError(
+                "create an account first: the proxy would make the dashboard reachable "
+                "from other computers, and right now it has no sign-in"
+            )
+
+        for address in bind_addresses(settings):
+
+            probe = "127.0.0.1" if address in ("0.0.0.0", "::") else address
+
+            try:
+                socket.create_connection((probe, settings["port"]), timeout=1).close()
+            except OSError:
+                continue
+
+            raise ProxyError(
+                f"port {settings['port']} is already in use by another program. Choose another "
+                "port, or stop whatever is using it."
+            )
+
+        run_dir().mkdir(parents=True, exist_ok=True)
+
+        if engine == "caddy":
+            command, environment, cwd = self.prepare_caddy(settings)
+        else:
+            command, environment, cwd = self.prepare_nginx(settings, manifest)
+
+        log = run_dir() / ("caddy.log" if engine == "caddy" else "nginx-start.log")
+
+        flags = 0
+
+        if os.name == "nt":
+            flags = (
+                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.DETACHED_PROCESS
+            )
+
+        process = subprocess.Popen(
+            command, cwd=cwd, env={**os.environ, **environment},
+            stdin=subprocess.DEVNULL, stdout=open(log, "ab"), stderr=subprocess.STDOUT,
+            creationflags=flags, start_new_session=(os.name != "nt")
+        )
+
+        if engine == "caddy":
+            self.pid_file("caddy").write_text(str(process.pid))
+
+        deadline = time.time() + START_WAIT
+
+        while time.time() < deadline:
+
+            if self.listening(settings):
+                return self.status()
+
+            if process.poll() is not None and engine == "caddy":
+                break
+
+            time.sleep(0.3)
+
+        reason = self.log_tail(15)
+
+        self.stop()
+
+        raise ProxyError("the proxy did not start:\n" + reason)
+
+    def prepare_caddy(self, settings):
+
+        data = run_dir() / "caddy-data"
+
+        data.mkdir(parents=True, exist_ok=True)
+
+        caddyfile = HERE / "proxy" / "Caddyfile"
+
+        if not caddyfile.exists():
+            raise ProxyError("proxy/Caddyfile is missing from the project")
+
+        env = caddy_environment(settings, self.upstream(), self.upload_mb(), data)
+
+        return (
+            [str(self.binary("caddy")), "run", "--config", str(caddyfile), "--adapter", "caddyfile"],
+            env, str(caddyfile.parent)
+        )
+
+    def prepare_nginx(self, settings, manifest):
+
+        root = run_dir() / "nginx"
+
+        for sub in ("logs", "temp/client_body", "temp/proxy", "conf"):
+            (root / sub).mkdir(parents=True, exist_ok=True)
+
+        binary = str(self.binary("nginx", manifest))
+
+        install = Path(binary).parent
+
+        cert, key = self.certificate_files(settings)
+
+        config = root / "conf" / "nginx.conf"
+
+        config.write_text(nginx_config(
+            settings, self.upstream(), self.upload_mb(),
+            {"install": install, "run": root, "cert": cert, "key": key}
+        ))
+
+        test = subprocess.run(
+            [binary, "-p", slash(root) + "/", "-c", str(config), "-t"],
+            capture_output=True, text=True, cwd=str(install)
+        )
+
+        if test.returncode != 0:
+            raise ProxyError("nginx rejected the configuration:\n" + (test.stderr or test.stdout).strip())
+
+        return [binary, "-p", slash(root) + "/", "-c", str(config)], {}, str(install)
+
+    def certificate_files(self, settings):
+        """(certificate, key) paths for nginx; makes a self-signed pair if asked to."""
+
+        if settings["tls"] == "files":
+            return self.cert_dir / settings["cert"], self.cert_dir / settings["key"]
+
+        from serve import ensure_certificate
+
+        hosts = ["localhost", "127.0.0.1", "::1", settings["address"]]
+
+        cert, key = ensure_certificate(run_dir() / "certs", extra_hosts=hosts)
+
+        return Path(cert), Path(key)
+
+    def listening(self, settings):
+
+        host = next((a for a in bind_addresses(settings) if a not in ("0.0.0.0", "::")), "127.0.0.1")
+
+        try:
+            socket.create_connection((host, settings["port"]), timeout=1).close()
+            return True
+        except OSError:
+            return False
+
+    def stop(self):
+
+        settings = self.settings()
+
+        engine = settings["engine"]
+
+        pid = self.pid(engine)
+
+        if pid is None:
+            self.pid_file(engine).unlink(missing_ok=True)
+            return self.status()
+
+        try:
+            process = psutil.Process(pid)
+
+            family = process.children(recursive=True)
+
+            if engine == "nginx":
+                # nginx asks its workers to finish what they are doing
+                manifest = self.manifest("nginx") or {}
+
+                binary = str(self.binary("nginx", manifest))
+
+                root = run_dir() / "nginx"
+
+                subprocess.run(
+                    [binary, "-p", slash(root) + "/", "-c", str(root / "conf" / "nginx.conf"), "-s", "quit"],
+                    capture_output=True, cwd=str(Path(binary).parent), timeout=20
+                )
+
+                psutil.wait_procs([process, *family], timeout=10)
+
+            else:
+                process.terminate()
+
+                psutil.wait_procs([process], timeout=10)
+
+            for leftover in [process, *family]:
+                if leftover.is_running():
+                    leftover.kill()
+
+        except psutil.Error:
+            pass
+
+        self.pid_file(engine).unlink(missing_ok=True)
+
+        return self.status()
+
+    def restart(self):
+
+        self.stop()
+
+        return self.start()
+
+    # inspection
+    def test(self):
+        """Request /api/healthz through the proxy, as a browser would."""
+
+        settings = self.settings()
+
+        if not self.pid(settings["engine"]):
+            raise ProxyError("the proxy is not running")
+
+        host = next((a for a in bind_addresses(settings) if a not in ("0.0.0.0", "::")), "127.0.0.1")
+
+        context = ssl.create_default_context()
+
+        # self-signed / local certificates are expected here: this test is about
+        # the path through the proxy, not about trusting its certificate
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+
+        began = time.time()
+
+        try:
+            with socket.create_connection((host, settings["port"]), timeout=10) as raw:
+                with context.wrap_socket(raw, server_hostname=settings["address"]) as tls:
+
+                    version = tls.version()
+
+                    tls.sendall((
+                        f"GET /api/healthz HTTP/1.1\r\nHost: {settings['address']}\r\n"
+                        "Connection: close\r\n\r\n"
+                    ).encode())
+
+                    data = b""
+
+                    while chunk := tls.recv(65536):
+                        data += chunk
+
+        except OSError as error:
+            return {"ok": False, "error": f"could not connect through the proxy: {error}"}
+
+        head, _, body = data.partition(b"\r\n\r\n")
+
+        lines = head.decode(errors="replace").split("\r\n")
+
+        headers = {
+            l.split(":", 1)[0].strip().lower(): l.split(":", 1)[1].strip()
+            for l in lines[1:] if ":" in l
+        }
+
+        status = int(lines[0].split()[1]) if lines and len(lines[0].split()) > 1 else 0
+
+        try:
+            health = json.loads(body.decode(errors="replace").strip().split("\r\n")[-1] or "{}")
+        except ValueError:
+            health = {}
+
+        return {
+            "ok": status == 200 and health.get("status") == "ok",
+            "http_status": status,
+            "tls": version,
+            "milliseconds": round((time.time() - began) * 1000),
+            "hsts": "strict-transport-security" in headers,
+            "dashboard": health.get("status"),
+            "server_banner": headers.get("server"),
+            "reaches_dashboard": status == 200
+        }
+
+    def log_tail(self, lines=60):
+
+        engine = self.settings()["engine"]
+
+        paths = [run_dir() / "nginx" / "logs" / "error.log", run_dir() / "nginx-start.log"] \
+            if engine == "nginx" else [run_dir() / "caddy.log"]
+
+        text = ""
+
+        for path in paths:
+            if path.exists():
+                text += path.read_text(errors="replace")
+
+        return "\n".join(text.strip().splitlines()[-lines:])
+
+    def certificate(self):
+        """The certificate a browser must trust, as PEM, with its details."""
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+
+        settings = self.settings()
+
+        if settings["engine"] == "caddy":
+
+            if settings["tls"] != "internal":
+                raise ProxyError("this site uses a certificate from Let's Encrypt: browsers already trust it")
+
+            path = run_dir() / "caddy-data" / "caddy" / "pki" / "authorities" / "local" / "root.crt"
+
+            kind = "Caddy's local certificate authority"
+
+        else:
+
+            path = self.certificate_files(settings)[0]
+
+            kind = "the proxy's certificate"
+
+            if settings["tls"] == "files":
+                raise ProxyError("you supplied this certificate, so you already have it")
+
+        if not path.exists():
+            raise ProxyError("there is no certificate yet: start the proxy once")
+
+        pem = path.read_bytes()
+
+        cert = x509.load_pem_x509_certificate(pem)
+
+        digest = cert.fingerprint(hashes.SHA256()).hex().upper()
+
+        return {
+            "pem": pem, "kind": kind,
+            "fingerprint": ":".join(digest[i:i + 2] for i in range(0, len(digest), 2)),
+            "expires": cert.not_valid_after_utc.date().isoformat(),
+            "subject": cert.subject.rfc4514_string()
+        }

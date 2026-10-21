@@ -1,0 +1,16 @@
+{
+  "trained_at": "2026-10-20T20:46:50",
+  "structure": "tan",
+  "training_rows": 982466,
+  "classes": {
+    "BENIGN": 778695,
+    "PortScan": 111251,
+    "DDoS": 89618,
+    "Web Attack": 1526,
+    "Bot": 1376
+  },
+  "threshold": 0.36999999999999994,
+  "anomaly_percentile": 99.5,
+  "novelty_bins": 4,
+  "validation_f1": 0.9929
+}
