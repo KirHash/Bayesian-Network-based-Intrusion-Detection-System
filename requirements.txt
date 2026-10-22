@@ -10,7 +10,7 @@ uvicorn>=0.30
 websockets>=13
 pydantic>=2.8
 scapy>=2.6
-cryptography>=42
+cryptography>=50.0.2
 psutil>=5.9
 
 # only for compare_baselines.py and the tests
