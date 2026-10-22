@@ -29,6 +29,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 import files
 import logbuffer
 from accounts import RANK, Accounts
@@ -201,6 +202,18 @@ app = FastAPI(title="Bayesian IDS", lifespan=lifespan)
 
 for module in (accounts, alerts, backups_routes, model, notifications, proxy, push, server, sources, uploads):
     app.include_router(module.router)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request, error):
+    """HTTP errors as JSON; an unknown API address says so whether or not the dashboard is built."""
+
+    detail = error.detail
+
+    if error.status_code == 404 and detail == "Not Found" and request.url.path.startswith("/api"):
+        detail = "no such API endpoint"
+
+    return JSONResponse({"detail": detail}, status_code=error.status_code, headers=getattr(error, "headers", None))
 
 
 @app.exception_handler(RequestValidationError)

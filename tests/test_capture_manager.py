@@ -128,7 +128,10 @@ def test_interfaces_are_listed_with_usable_ones_first():
     ("csv", "x.pcap", "not a csv"),
     ("pcap", "missing.pcap", "no such file"),
 ])
-def test_invalid_requests_are_refused(manager, mode, target, message):
+def test_invalid_requests_are_refused(manager, monkeypatch, mode, target, message):
+
+    # a machine without the right to capture (a CI runner) would answer with that problem first
+    monkeypatch.setattr(manager, "diagnose", lambda: {"can_capture": True, "problems": []})
 
     with pytest.raises(ValueError, match=message):
         manager.start(mode, target)
