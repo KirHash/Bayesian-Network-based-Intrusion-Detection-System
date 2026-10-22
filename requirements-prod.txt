@@ -14,4 +14,4 @@ websockets>=13
 pydantic>=2.8
 scapy>=2.6
 cryptography>=42
-psutil>=5.9
+psutil>=7.2.2
