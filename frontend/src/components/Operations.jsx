@@ -1,4 +1,5 @@
 import Guard from "./Guard.jsx";
+import BackupsPanel from "./BackupsPanel.jsx";
 import CapturePanel from "./CapturePanel.jsx";
 import FilesPanel from "./FilesPanel.jsx";
 import IngestPanel from "./IngestPanel.jsx";
@@ -25,6 +26,7 @@ export default function Operations({ live }) {
         <Guard name="ProxyPanel"><ProxyPanel /></Guard>
         <Guard name="NotificationSettings"><NotificationSettings /></Guard>
         <Guard name="ServerPanel"><ServerPanel /></Guard>
+        <Guard name="BackupsPanel"><BackupsPanel revision={live.revision} /></Guard>
         <Guard name="UsersPanel"><UsersPanel /></Guard>
       </div>
     </div>

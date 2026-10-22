@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from data_loader import clean_features, dataset_dir
+from data_loader import clean_features, dataset_dir, normalize_labels
 from feature_extractor import FEATURES
 
 AREAS = ("captures", "dataset", "certs")
@@ -108,7 +108,7 @@ def check_dataset_csv(path):
         raise FileError(
             "missing columns the model needs: " + ", ".join(missing[:6])
             + (" ..." if len(missing) > 6 else "")
-            + ". Use the MachineLearningCSV files of CIC-IDS-2017."
+            + ". Use the MachineLearningCSV files of CIC-IDS-2017 or the CSE-CIC-IDS2018 CSVs."
         )
 
 
@@ -155,12 +155,9 @@ def label_counts(path):
     labels = pd.read_csv(path, usecols=lambda c: c.strip() == "Label",
                          encoding="latin-1").iloc[:, 0].dropna()
 
-    labels = (
-        labels.astype(str).str.strip().str.replace("\x96", "-", regex=False)
-        .str.replace(r"^Web Attack.*$", "Web Attack", regex=True)
-    )
+    labels = normalize_labels(labels)
 
-    return {k: int(v) for k, v in labels.value_counts().items()}
+    return {k: int(v) for k, v in labels[labels != "Label"].value_counts().items()}
 
 
 def listing(area, captures_dir):

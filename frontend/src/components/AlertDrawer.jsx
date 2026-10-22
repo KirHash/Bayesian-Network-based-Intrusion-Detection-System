@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { getJSON, send } from "../api.js";
 import { useAuth } from "../auth.js";
+import IpInfo from "./IpInfo.jsx";
 import {
   RISK_COLOR,
   STATUS_COLOR,
@@ -107,10 +108,22 @@ export default function AlertDrawer({ alertId, revision, onClose }) {
                   {alert.src_ip} → {alert.dst_ip}:{alert.dst_port}
                 </span>
               )}
+              {alert.src_ip && (
+                <div className="ip-panel">
+                  <IpInfo address={alert.src_ip} label="from" />
+                  <IpInfo address={alert.dst_ip} label="to" />
+                </div>
+              )}
               {alert.label !== null && (
                 <span className="muted">Ground truth: {alert.label}</span>
               )}
               <span className="muted small-text">{REASON[alert.reason]}</span>
+              {alert.forest !== null && alert.forest !== undefined && (
+                <span className="muted small-text">
+                  Second opinion: a random forest rates this {alert.forest.toFixed(2)}% likely to be an
+                  attack{alert.reason === "classifier" && alert.forest >= 50 ? ", agreeing." : "."}
+                </span>
+              )}
             </div>
 
             <h3>Handling</h3>

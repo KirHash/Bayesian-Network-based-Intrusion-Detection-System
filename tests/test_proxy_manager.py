@@ -9,12 +9,8 @@ those tests are skipped where they are missing.
 import hashlib
 import json
 import os
-import shutil
 import socket
-import subprocess
-import sys
 import threading
-import time
 import zipfile
 import tarfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -201,7 +197,7 @@ def test_caddy_environment_matches_the_settings():
         "127.0.0.1:8000", 4097, "D:/data"
     )
 
-    assert public["IDS_AUTO_HTTPS"] == "on" and public["IDS_BIND"] == "0.0.0.0 ::"
+    assert public["IDS_AUTO_HTTPS"] == "ignore_loaded_certs" and public["IDS_BIND"] == "0.0.0.0 ::"
     assert public["IDS_TLS"] == "me@example.com"
 
 
@@ -843,3 +839,24 @@ def test_nginx_rejecting_its_configuration_is_explained(tmp_path, monkeypatch, u
         assert not proxy.running()
     finally:
         store.close()
+
+
+@needs_caddy
+@pytest.mark.parametrize("settings", [
+    {},                                                                   # local
+    {"address": "ids.example.com", "port": 443, "expose": True, "tls": "me@example.com"},   # public, Let's Encrypt
+    {"address": "ids.example.com", "port": 443, "expose": True, "tls": "internal"},
+])
+def test_real_caddy_accepts_the_configuration_the_panel_generates(settings):
+    """`caddy adapt` is Caddy's own parser: a value it rejects would stop the proxy from starting."""
+
+    import subprocess
+
+    env = {**os.environ, **caddy_environment({**pm.DEFAULTS, **settings}, "127.0.0.1:8000", 4097, "D:/data")}
+
+    done = subprocess.run(
+        [str(REAL_BIN / ("caddy.exe" if os.name == "nt" else "caddy")), "adapt", "--config", str(pm.HERE / "proxy" / "Caddyfile")],
+        capture_output=True, text=True, env=env, timeout=60
+    )
+
+    assert done.returncode == 0, done.stderr

@@ -4,7 +4,6 @@ starts with no model and no data, training data is uploaded, the model is
 trained, and traffic is scored. No terminal step in between.
 """
 import importlib
-import time
 
 import pytest
 from fastapi.testclient import TestClient

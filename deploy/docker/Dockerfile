@@ -17,6 +17,12 @@ RUN npm run build
 # -- server --------------------------------------------------------------------
 FROM python:3.12-slim
 
+# CAPTURE=true (the default) lets python sniff packets, which needs NET_RAW and NET_ADMIN when the
+# container runs (see docker-compose.yml here). A server that only takes uploads and API input
+# builds with CAPTURE=false, runs with no extra capabilities, and gives python no capture rights:
+# a binary with file capabilities will not even start in a container that lacks them.
+ARG CAPTURE=true
+
 # tcpdump compiles capture filters; libcap2-bin gives python its capture rights
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tcpdump libpcap0.8 libcap2-bin \
@@ -34,7 +40,9 @@ COPY --from=frontend /build/dist ./frontend/dist
 RUN useradd --system --create-home --home-dir /data ids \
  && mkdir -p /data/captures \
  && chown -R ids:ids /data \
- && setcap cap_net_raw,cap_net_admin=eip "$(readlink -f "$(which python3)")"
+ && if [ "$CAPTURE" = "true" ]; then \
+      setcap cap_net_raw,cap_net_admin=eip "$(readlink -f "$(which python3)")"; \
+    fi
 
 USER ids
 

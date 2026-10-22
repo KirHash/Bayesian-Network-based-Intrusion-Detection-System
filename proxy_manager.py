@@ -27,7 +27,6 @@ import shutil
 import socket
 import ssl
 import subprocess
-import sys
 import tarfile
 import tempfile
 import time
@@ -247,7 +246,7 @@ def caddy_environment(settings, upstream, upload_mb, data_dir):
         "IDS_UPLOAD_LIMIT": str(upload_mb * 1024 * 1024),
         "IDS_BIND": " ".join(bind_addresses(settings)),
         # a public site on the standard port also redirects http to https
-        "IDS_AUTO_HTTPS": "on" if public and settings["port"] == 443 else "disable_redirects",
+        "IDS_AUTO_HTTPS": "ignore_loaded_certs" if public and settings["port"] == 443 else "disable_redirects",
         "XDG_DATA_HOME": str(data_dir),
         "XDG_CONFIG_HOME": str(data_dir)
     }
@@ -1012,7 +1011,7 @@ class ProxyManager:
         """The certificate a browser must trust, as PEM, with its details."""
 
         from cryptography import x509
-        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives import hashes
 
         settings = self.settings()
 

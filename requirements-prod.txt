@@ -1,11 +1,13 @@
 # What a running server needs (no tests, no model training extras).
 # pgmpy is here because the trained model file is unpickled with it.
 # Only load a bayesian_ids.pkl you trained yourself: pickle runs code.
-numpy>=2.0
-pandas>=2.2
-scipy>=1.13
-scikit-learn>=1.5
-pgmpy>=1.1
+# The trained model is a pickle: it only loads cleanly (and safely) with the library versions that
+# made it, so these five are pinned exactly. After upgrading them, retrain (Operations -> Model).
+numpy==2.3.4
+pandas==2.3.3
+scipy==1.17.1
+scikit-learn==1.9.0
+pgmpy==1.1.2
 fastapi>=0.115
 uvicorn>=0.30
 websockets>=13

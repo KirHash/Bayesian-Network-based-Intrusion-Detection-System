@@ -4,8 +4,9 @@ start it, test it, read its certificate, stop it, and put the dashboard itself i
 proxy mode. Real Caddy / nginx programs are used where installed.
 """
 import importlib
-import json
-import socket
+
+import api_core
+import lifecycle
 import sys
 
 import pytest
@@ -62,13 +63,14 @@ def client(tmp_path_factory, upstream):
     api = importlib.reload(importlib.import_module("api"))
 
     # the proxy should reach the stand-in, not whatever listens on port 8000
-    api.real_dashboard_upstream = api.dashboard_upstream
-    mp.setattr(api, "dashboard_upstream", lambda: upstream.address)
+    real_upstream = api_core.dashboard_upstream
+    mp.setattr(api_core, "dashboard_upstream", lambda: upstream.address)
 
     with TestClient(api.app) as client:
 
         client.api = api
         client.base = base
+        client.real_upstream = real_upstream
 
         yield client
 
@@ -255,19 +257,17 @@ def test_exposing_the_dashboard_needs_an_account(client, engine):
 
 def test_the_dashboard_can_be_restarted_in_proxy_mode(client, monkeypatch):
 
-    api = client.api
-
     spawned = []
 
-    monkeypatch.setattr(api.lifecycle, "original_command",
+    monkeypatch.setattr(lifecycle, "original_command",
                         lambda: [sys.executable, "D:/IDS/serve.py", "--port", "8000"])
 
-    monkeypatch.setattr(api.lifecycle, "spawn_relauncher", lambda command=None, **kw: spawned.append(command))
+    monkeypatch.setattr(lifecycle, "spawn_relauncher", lambda command=None, **kw: spawned.append(command))
 
     # run the relaunch step directly instead of exiting the test process
     done = []
 
-    monkeypatch.setattr(api.lifecycle, "restart", lambda spawn=None, **kw: (spawn and spawn(), done.append(True)))
+    monkeypatch.setattr(lifecycle, "restart", lambda spawn=None, **kw: (spawn and spawn(), done.append(True)))
 
     status = client.get("/api/proxy").json()
 
@@ -286,7 +286,7 @@ def test_the_dashboard_can_be_restarted_in_proxy_mode(client, monkeypatch):
     assert spawned[0].count("--behind-proxy") == 1
 
     # switching it off removes the flag again
-    monkeypatch.setattr(api.lifecycle, "original_command",
+    monkeypatch.setattr(lifecycle, "original_command",
                         lambda: [sys.executable, "D:/IDS/serve.py", "--behind-proxy"])
 
     spawned.clear()
@@ -304,7 +304,7 @@ def test_the_dashboard_can_be_restarted_in_proxy_mode(client, monkeypatch):
 
 def test_proxy_mode_cannot_be_switched_for_a_server_not_started_with_serve_py(client, monkeypatch):
 
-    monkeypatch.setattr(client.api.lifecycle, "original_command",
+    monkeypatch.setattr(lifecycle, "original_command",
                         lambda: ["python", "-m", "uvicorn", "api:app"])
 
     response = client.post("/api/server/restart", json={"behind_proxy": True})
@@ -314,17 +314,15 @@ def test_proxy_mode_cannot_be_switched_for_a_server_not_started_with_serve_py(cl
 
 def test_the_upstream_address_comes_from_how_the_dashboard_was_started(client, monkeypatch):
 
-    api = client.api
-
     for command, expected in [
         (["python", "serve.py"], "127.0.0.1:8000"),
         (["python", "serve.py", "--port", "9000"], "127.0.0.1:9000"),
         (["python", "serve.py", "--host", "0.0.0.0", "--port", "8123"], "127.0.0.1:8123"),
         (["python", "serve.py", "--host", "10.0.0.5"], "10.0.0.5:8000"),
     ]:
-        monkeypatch.setattr(api.lifecycle, "original_command", lambda c=command: c)
+        monkeypatch.setattr(lifecycle, "original_command", lambda c=command: c)
 
-        assert api.real_dashboard_upstream() == expected
+        assert client.real_upstream() == expected
 
 
 # -- who may use it -----------------------------------------------------------------------------------

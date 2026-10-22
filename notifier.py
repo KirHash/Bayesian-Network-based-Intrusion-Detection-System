@@ -16,6 +16,8 @@ import logging
 import os
 import re
 import smtplib
+import threading
+import time
 import urllib.request
 from collections import Counter
 from email.message import EmailMessage
@@ -282,8 +284,6 @@ def masked(settings):
 
     mail = settings.get("email")
 
-    host = re.match(r"^https?://[^/]+", (hook or {}).get("url", "") or "")
-
     return {
         "min_risk": settings["min_risk"], "sources": settings["sources"],
         "window_seconds": settings["window_seconds"], "base_url": settings["base_url"],
@@ -340,6 +340,13 @@ class Notifier:
         self.pending = []
 
         self.task = None
+
+        # when each kind of security message was last sent
+        self.security_sent = {}
+
+        # push notifications to browsers (a PushService, set by the server), and the Critical alerts waiting for one
+        self.push = None
+        self.pending_push = []
 
     def load_managed(self):
         """Use the settings saved from the dashboard, if there are any."""
@@ -449,6 +456,10 @@ class Notifier:
     def submit(self, alerts):
         """Queue alerts that match the configured risk and sources."""
 
+        # Critical alerts of real traffic also go to devices that asked for push notifications
+        if self.push:
+            self.pending_push += [a for a in alerts if a["risk"] == "Critical" and a["source"] != "replay"]
+
         if not self.channels():
             return
 
@@ -481,12 +492,93 @@ class Notifier:
 
                 await asyncio.to_thread(self.send, batch)
 
+            if self.pending_push:
+
+                batch, self.pending_push = self.pending_push, []
+
+                await asyncio.to_thread(self.send_push, batch)
+
     # -- sending ----------------------------------------------------------
+
+    def send_push(self, alerts):
+        """One push for a window's Critical alerts (never one per alert). Returns the counts, or None."""
+
+        if not self.push or not alerts:
+            return None
+
+        worst = max(alerts, key=lambda a: a["probability"])
+
+        types = Counter(a["attack_type"] for a in alerts)
+
+        title = f"{len(alerts)} Critical alert{'s' if len(alerts) != 1 else ''}"
+
+        where = f" from {worst['src_ip']}" if worst.get("src_ip") else ""
+
+        body = ", ".join(f"{n} {t}" for t, n in types.most_common(3)) + where
+
+        counts = self.push.notify(title, body, f"/?alert={worst['id']}")
+
+        self.store.log_notification(
+            "push", counts["failed"] == 0 and (counts["sent"] + counts["gone"]) > 0, len(alerts),
+            f"{counts['sent']} sent, {counts['gone']} gone, {counts['failed']} failed"
+        )
+
+        return counts
+
+    def security(self, kind, text, every=300):
+        """Tell every channel about a security event (a lockout, two-factor changes) right away.
+
+        Not tied to the risk level or the alert digest window. A kind is sent at most once per `every`
+        seconds so a password-guessing run cannot flood the channel; everything is in the audit trail.
+        """
+
+        self.security_push(kind, text)
+
+        if not self.channels():
+            return False
+
+        now = time.time()
+
+        if now - self.security_sent.get(kind, 0) < every:
+            return False
+
+        self.security_sent[kind] = now
+
+        threading.Thread(
+            target=self.deliver, args=(f"Security: {kind}", text, 0), daemon=True
+        ).start()
+
+        return True
+
+    def security_push(self, kind, text):
+        """The same security event to administrators' devices (rate limited like the channels)."""
+
+        if not self.push or not self.store.list_push() or time.time() - self.security_sent.get("push:" + kind, 0) < 300:
+            return False
+
+        self.security_sent["push:" + kind] = time.time()
+
+        threading.Thread(target=self.push_quietly, args=(f"Security: {kind}", text), daemon=True).start()
+
+        return True
+
+    def push_quietly(self, title, text):
+        """Push to administrators from a background thread; a failure is logged, never raised."""
+
+        try:
+            self.push.notify(title, text, "/#operations", role="admin")
+        except Exception:
+            log.exception("a push notification could not be sent")
 
     def send(self, alerts, test=False):
         """Send one digest on every channel; returns per-channel results."""
 
         subject, text = digest(alerts, self.config["base_url"], test=test)
+
+        return self.deliver(subject, text, len(alerts))
+
+    def deliver(self, subject, text, count):
+        """Send a prepared message on every channel; returns per-channel results."""
 
         results = {}
 
@@ -502,12 +594,12 @@ class Notifier:
             try:
                 sender(settings, subject, text)
                 results[channel] = {"ok": True}
-                self.store.log_notification(channel, True, len(alerts))
+                self.store.log_notification(channel, True, count)
 
             except Exception as error:
                 results[channel] = {"ok": False, "error": str(error)}
                 self.store.log_notification(
-                    channel, False, len(alerts), str(error)
+                    channel, False, count, str(error)
                 )
 
         return results

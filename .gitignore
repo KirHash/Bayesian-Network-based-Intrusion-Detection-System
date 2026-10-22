@@ -32,3 +32,9 @@ frontend/dist/
 Thumbs.db
 
 !tests/data/*.key
+*.pkl.previous
+*.pkl.tmp
+
+# backups made by the server, and design-tool working files
+backups/
+.taste-skill/

@@ -267,7 +267,10 @@ def test_captured_flows_keep_their_addresses(client):
 
     flows = client.api.hub.replay_pool.drop(columns="Label")
 
-    flows = flows[flows["Destination Port"] == 22].head(20)
+    # only the 2017 files carry addresses; the 2018 ones leave them empty
+    flows = flows[(flows["Destination Port"] == 22) & (flows["Source IP"] != "")].head(20)
+
+    assert len(flows)
 
     result = client.post(
         "/api/score?source=capture",
@@ -550,5 +553,22 @@ def test_admin_token_protects_the_dashboard_api(client, monkeypatch):
         with client.websocket_connect("/ws") as ws:
             ws.receive_json()
 
-    with client.websocket_connect("/ws?token=s3cret") as ws:
+    # a session token in the address is no longer accepted: a one-time ticket is
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws?token=s3cret") as ws:
+            ws.receive_json()
+
+    ticket = client.post("/api/ws-ticket", headers={"Authorization": "Bearer s3cret"}).json()["ticket"]
+
+    with client.websocket_connect(f"/ws?ticket={ticket}") as ws:
         assert ws.receive_json()["type"] == "hello"
+
+
+def test_flows_without_addresses_do_not_become_the_text_nan():
+
+    import api_core as api
+
+    assert api.address({"Source IP": float("nan")}, "Source IP") is None
+    assert api.address({"Source IP": ""}, "Source IP") is None
+    assert api.address({}, "Source IP") is None
+    assert api.address({"Source IP": " 10.0.0.1 "}, "Source IP") == "10.0.0.1"

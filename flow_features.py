@@ -23,6 +23,7 @@ than documented, the code says so. Known approximations:
 For exact fidelity, run the Java CICFlowMeter and point live_monitor.py
 at its CSV instead.
 """
+import ipaddress
 from datetime import datetime
 
 import numpy as np
@@ -55,7 +56,6 @@ class Flow:
 
         self.windows = {True: None, False: None}
         self.min_header = None
-        self.finished = False
 
     @property
     def start(self):
@@ -154,14 +154,65 @@ class Flow:
         }
 
 
+def is_group_address(address, broadcasts=()):
+    """Multicast or broadcast: traffic meant for many hosts (service discovery, mDNS, SSDP, NetBIOS).
+
+    CIC-IDS-2017 has almost none of it, so the model reads it as unfamiliar and raises
+    alerts on ordinary network chatter. Such flows are not scored. `broadcasts` holds the
+    subnet broadcast addresses of the captured interface (see local_broadcasts).
+    """
+
+    if address in broadcasts:
+        return True
+
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+
+    return ip.is_multicast or address == "255.255.255.255"
+
+
+def local_broadcasts():
+    """Subnet broadcast addresses of this machine's IPv4 interfaces, e.g. 192.168.1.255."""
+
+    try:
+        import psutil
+    except ImportError:
+        return set()
+
+    found = set()
+
+    for addresses in psutil.net_if_addrs().values():
+        for item in addresses:
+
+            if item.family.name != "AF_INET" or not item.netmask:
+                continue
+
+            try:
+                network = ipaddress.ip_network(f"{item.address}/{item.netmask}", strict=False)
+            except ValueError:
+                continue
+
+            if network.prefixlen < 31:
+                found.add(str(network.broadcast_address))
+
+    return found
+
+
 class FlowTable:
     """Assembles packets into flows and hands back the finished ones."""
 
-    def __init__(self, flow_timeout=FLOW_TIMEOUT, idle_timeout=IDLE_TIMEOUT):
+    def __init__(self, flow_timeout=FLOW_TIMEOUT, idle_timeout=IDLE_TIMEOUT, ignore_groups=False, broadcasts=()):
 
         self.flow_timeout = flow_timeout
         self.idle_timeout = idle_timeout
         self.flows = {}
+
+        # Skip multicast / broadcast destinations (live capture turns this on)
+        self.ignore_groups = ignore_groups
+        self.broadcasts = set(broadcasts)
+        self.ignored = set()
 
     @staticmethod
     def parse(packet):
@@ -198,6 +249,11 @@ class FlowTable:
             return []
 
         src, dst, sport, dport, protocol, payload, window, header = parsed
+
+        if self.ignore_groups and is_group_address(dst, self.broadcasts):
+            self.ignored.add((src, dst, sport, dport, protocol))
+
+            return []
 
         time = float(packet.time)
 

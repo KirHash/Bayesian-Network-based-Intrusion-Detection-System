@@ -235,3 +235,18 @@ def test_data_survives_reopening(tmp_path, make_alert):
     assert second.get_alert(1)["status"] == "resolved"
 
     second.close()
+
+
+def test_stats_cross_tabulate_attack_type_and_risk(store, make_alert):
+
+    store.add_alerts([
+        make_alert(attack_type="DDoS", risk="Critical"),
+        make_alert(attack_type="DDoS", risk="Critical"),
+        make_alert(attack_type="DDoS", risk="High"),
+        make_alert(attack_type="Bot", risk="Medium"),
+    ])
+
+    stats = store.stats()
+
+    assert stats["by_type_risk"] == {"DDoS": {"Critical": 2, "High": 1}, "Bot": {"Medium": 1}}
+    assert stats["by_type"] == {"DDoS": 3, "Bot": 1}

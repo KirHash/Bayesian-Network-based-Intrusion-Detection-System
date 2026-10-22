@@ -70,8 +70,3 @@ class SecretBox:
             raise ValueError(
                 "a stored secret cannot be decrypted: the key changed or was lost"
             )
-
-    @staticmethod
-    def is_encrypted(value):
-
-        return isinstance(value, str) and value.startswith(PREFIX)

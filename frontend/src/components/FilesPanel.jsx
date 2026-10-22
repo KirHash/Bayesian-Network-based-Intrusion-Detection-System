@@ -63,6 +63,39 @@ function putFile(url, file, onProgress) {
   });
 }
 
+// attack labels in the full CIC-IDS-2017 set that the model can learn once their files are uploaded
+const KNOWN_ATTACKS = [
+  "DoS Hulk",
+  "DoS GoldenEye",
+  "DoS slowloris",
+  "DoS Slowhttptest",
+  "FTP-Patator",
+  "SSH-Patator",
+  "Heartbleed"
+];
+
+/** Which known attack types no uploaded file contains yet (so the model has never seen them). */
+function MissingClasses({ entries }) {
+  if (!entries.length || entries.some((f) => f.labels === null && !f.error)) return null;
+
+  const seen = entries.flatMap((f) => Object.keys(f.labels || {})).map((l) => l.toLowerCase());
+
+  const missing = KNOWN_ATTACKS.filter((name) => !seen.some((l) => l.includes(name.toLowerCase())));
+
+  if (!missing.length) return null;
+
+  return (
+    <div className="muted small-text" style={{ marginTop: 8 }}>
+      Not in your data yet, so the model has never seen: {missing.join(", ")}. The Tuesday, Wednesday
+      and Thursday-afternoon files hold them; download the CSVs from the{" "}
+      <a href="https://www.unb.ca/cic/datasets/ids-2017.html" target="_blank" rel="noreferrer">
+        CIC-IDS-2017 page
+      </a>
+      , upload them here and press Retrain.
+    </div>
+  );
+}
+
 function Area({ area, entries, folder, maxMb, reload }) {
   const { title, help, accept } = AREAS[area];
   const input = useRef(null);
@@ -193,6 +226,8 @@ function Area({ area, entries, folder, maxMb, reload }) {
             ))}
         </div>
       ))}
+
+      {area === "dataset" && <MissingClasses entries={entries} />}
 
       {!entries.length && <div className="muted small-text">No files yet.</div>}
 

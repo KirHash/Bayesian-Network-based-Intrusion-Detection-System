@@ -3,9 +3,9 @@ import { useState } from "react";
 import { SOURCE_LABEL } from "../theme.js";
 
 const TONE = {
-  stable: "#4cc38a",
-  warning: "#f7d154",
-  drift: "#ff5370",
+  stable: "#44a282",
+  warning: "#d9a441",
+  drift: "#e5566f",
   "warming up": "#8b95a7",
   unavailable: "#8b95a7"
 };
@@ -13,7 +13,7 @@ const TONE = {
 const WORST_FIRST = (a, b) => b[1] - a[1];
 
 /** Latest drift report of the selected source (or every source). */
-export default function DriftCard({ drift, source }) {
+export default function DriftCard({ drift, source, onOpenPage }) {
   const [open, setOpen] = useState(false);
 
   const entries = Object.entries(drift).filter(
@@ -24,9 +24,16 @@ export default function DriftCard({ drift, source }) {
     <div className="card">
       <div className="card-head">
         <h2>Traffic drift</h2>
-        <button className="btn small" onClick={() => setOpen(!open)}>
-          {open ? "Hide features" : "Features"}
-        </button>
+        <span className="card-actions">
+          {onOpenPage && (
+            <button className="btn small" onClick={onOpenPage}>
+              Details
+            </button>
+          )}
+          <button className="btn small" onClick={() => setOpen(!open)}>
+            {open ? "Hide features" : "Features"}
+          </button>
+        </span>
       </div>
 
       {!entries.length && (

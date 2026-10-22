@@ -13,8 +13,6 @@ from datetime import datetime
 
 STATUSES = ["new", "investigating", "resolved", "false_positive"]
 
-OPEN_STATUSES = ["new", "investigating"]
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +32,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     note TEXT,
     updated_at TEXT NOT NULL,
     posterior TEXT,
-    features TEXT
+    features TEXT,
+    forest REAL
 );
 CREATE INDEX IF NOT EXISTS alerts_status ON alerts(status, id);
 CREATE INDEX IF NOT EXISTS alerts_source ON alerts(source, id);
@@ -64,14 +63,19 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL,
     disabled INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    last_login TEXT
+    last_login TEXT,
+    totp_secret TEXT,
+    totp_enabled INTEGER NOT NULL DEFAULT 0,
+    totp_step INTEGER NOT NULL DEFAULT 0,
+    recovery TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT PRIMARY KEY,
     username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
     created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    expires_at TEXT NOT NULL,
+    client TEXT
 );
 
 CREATE TABLE IF NOT EXISTS audit (
@@ -85,6 +89,14 @@ CREATE TABLE IF NOT EXISTS audit (
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -122,8 +134,31 @@ class Store:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=NORMAL")
             self.db.execute("PRAGMA foreign_keys=ON")
-            self.db.executescript(SCHEMA)
-            self.db.commit()
+            self._migrate()
+
+    def _migrate(self):
+        """Create what is missing and bring an older database up to date (caller holds the lock)."""
+
+        self.db.executescript(SCHEMA)
+
+        # databases made before the forest's second opinion existed
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(alerts)")}
+
+        if "forest" not in columns:
+            self.db.execute("ALTER TABLE alerts ADD COLUMN forest REAL")
+
+        # databases made before two-factor sign-in and the session list existed
+        for column, kind in (
+            ("totp_secret", "TEXT"), ("totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("totp_step", "INTEGER NOT NULL DEFAULT 0"), ("recovery", "TEXT")
+        ):
+            if column not in {row[1] for row in self.db.execute("PRAGMA table_info(users)")}:
+                self.db.execute(f"ALTER TABLE users ADD COLUMN {column} {kind}")
+
+        if "client" not in {row[1] for row in self.db.execute("PRAGMA table_info(sessions)")}:
+            self.db.execute("ALTER TABLE sessions ADD COLUMN client TEXT")
+
+        self.db.commit()
 
     # -- writes ----------------------------------------------------------
 
@@ -142,8 +177,8 @@ class Store:
             self.db.executemany(
                 "INSERT INTO alerts (time, source, attack_type, reason, risk,"
                 " probability, surprise, label, src_ip, dst_ip, dst_port,"
-                " updated_at, posterior, features)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " updated_at, posterior, features, forest)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         r["time"], r["source"], r["attack_type"], r["reason"],
@@ -151,7 +186,8 @@ class Store:
                         r.get("label"), r.get("src_ip"), r.get("dst_ip"),
                         r.get("dst_port"), r["time"],
                         json.dumps(r.get("posterior")),
-                        json.dumps(r.get("features"))
+                        json.dumps(r.get("features")),
+                        r.get("forest")
                     )
                     for r in records
                 ]
@@ -353,9 +389,51 @@ class Store:
             finally:
                 target.close()
 
+    def restore_from(self, path, keep_session=None):
+        """Replace the whole database with a backup, in place (the server keeps running).
+
+        Everyone is signed out afterwards except the session `keep_session` (the administrator who asked),
+        and only if that account exists in the backup: a restore after a break-in must not leave old
+        sessions alive. A backup from an older version is brought up to date.
+        """
+
+        import sqlite3
+
+        with self.lock:
+
+            kept = self.db.execute(
+                "SELECT * FROM sessions WHERE token_hash = ?", (keep_session,)
+            ).fetchone() if keep_session else None
+
+            source = sqlite3.connect(path)
+
+            try:
+                source.backup(self.db)
+            finally:
+                source.close()
+
+            self.db.execute("DELETE FROM sessions")
+
+            self._migrate()
+
+            if kept is not None and self.db.execute(
+                "SELECT 1 FROM users WHERE username = ?", (kept["username"],)
+            ).fetchone():
+                columns = kept.keys()
+
+                self.db.execute(
+                    f"INSERT INTO sessions ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+                    tuple(kept[c] for c in columns)
+                )
+
+            self.db.commit()
+
     # -- users and sessions ------------------------------------------------
 
-    USER_FIELDS = ("password_hash", "role", "disabled", "last_login")
+    USER_FIELDS = (
+        "password_hash", "role", "disabled", "last_login",
+        "totp_secret", "totp_enabled", "totp_step", "recovery"
+    )
 
     def count_users(self):
 
@@ -415,13 +493,24 @@ class Store:
 
             self.db.commit()
 
+    def rename_user(self, old, new):
+        """Change a username. Sessions are dropped first: they refer to the old name."""
+
+        with self.lock:
+
+            self.db.execute("DELETE FROM sessions WHERE username = ?", (old,))
+            self.db.execute("UPDATE users SET username = ? WHERE username = ?", (new, old))
+            self.db.execute("UPDATE push_subscriptions SET username = ? WHERE username = ?", (new, old))
+            self.db.commit()
+
     def delete_user(self, username):
 
         with self.lock:
             self.db.execute("DELETE FROM users WHERE username = ?", (username,))
+            self.db.execute("DELETE FROM push_subscriptions WHERE username = ?", (username,))
             self.db.commit()
 
-    def add_session(self, token_hash, username, expires_at):
+    def add_session(self, token_hash, username, expires_at, client=None):
 
         with self.lock:
 
@@ -429,9 +518,9 @@ class Store:
             self.db.execute("DELETE FROM sessions WHERE expires_at < ?", (now(),))
 
             self.db.execute(
-                "INSERT INTO sessions (token_hash, username, created_at, expires_at)"
-                " VALUES (?,?,?,?)",
-                (token_hash, username, now(), expires_at)
+                "INSERT INTO sessions (token_hash, username, created_at, expires_at, client)"
+                " VALUES (?,?,?,?,?)",
+                (token_hash, username, now(), expires_at, client)
             )
 
             self.db.commit()
@@ -449,6 +538,31 @@ class Store:
             ).fetchone()
 
         return dict(row) if row else None
+
+    def list_sessions(self, username):
+        """A person's live sessions, newest first (token hashes are the only identifiers)."""
+
+        with self.lock:
+
+            rows = self.db.execute(
+                "SELECT token_hash, created_at, expires_at, client FROM sessions"
+                " WHERE username = ? AND expires_at >= ? ORDER BY created_at DESC",
+                (username, now())
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def delete_other_sessions(self, username, keep_hash):
+
+        with self.lock:
+
+            done = self.db.execute(
+                "DELETE FROM sessions WHERE username = ? AND token_hash != ?", (username, keep_hash)
+            ).rowcount
+
+            self.db.commit()
+
+        return done
 
     def delete_session(self, token_hash):
 
@@ -489,6 +603,47 @@ class Store:
 
         with self.lock:
             self.db.execute("DELETE FROM settings WHERE key = ?", (key,))
+            self.db.commit()
+
+    # -- push subscriptions (browsers that asked for notifications) ------------------------------------
+
+    def add_push(self, endpoint, username, p256dh, auth):
+        """Register a browser; the same endpoint registered again takes the new owner and keys."""
+
+        with self.lock:
+
+            self.db.execute(
+                "INSERT INTO push_subscriptions (endpoint, username, p256dh, auth, created_at)"
+                " VALUES (?,?,?,?,?)"
+                " ON CONFLICT(endpoint) DO UPDATE SET username = excluded.username,"
+                " p256dh = excluded.p256dh, auth = excluded.auth",
+                (endpoint, username, p256dh, auth, now())
+            )
+
+            self.db.commit()
+
+    def list_push(self, username=None):
+
+        with self.lock:
+
+            rows = self.db.execute(
+                "SELECT endpoint, username, p256dh, auth, created_at FROM push_subscriptions"
+                + (" WHERE username = ?" if username is not None else "") + " ORDER BY created_at",
+                (username,) if username is not None else ()
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def delete_push(self, endpoint, username=None):
+
+        with self.lock:
+
+            self.db.execute(
+                "DELETE FROM push_subscriptions WHERE endpoint = ?"
+                + (" AND username = ?" if username is not None else ""),
+                (endpoint, username) if username is not None else (endpoint,)
+            )
+
             self.db.commit()
 
     def log_notification(self, channel, ok, alerts, detail=""):
@@ -600,6 +755,16 @@ class Store:
             by_risk = grouped("risk")
             by_status = grouped("status")
 
+            # attack type x risk band, for the overview's threat matrix
+            matrix = {}
+
+            for row in self.db.execute(
+                f"SELECT attack_type AS t, risk AS r, COUNT(*) AS n FROM alerts{where}"
+                " GROUP BY attack_type, risk",
+                params
+            ).fetchall():
+                matrix.setdefault(row["t"], {})[row["r"]] = row["n"]
+
             traffic_where = (
                 " WHERE source = ?" if source and source != "all" else ""
             )
@@ -615,7 +780,8 @@ class Store:
             "alerts": sum(by_type.values()),
             "by_type": by_type,
             "by_risk": by_risk,
-            "by_status": by_status
+            "by_status": by_status,
+            "by_type_risk": matrix
         }
 
     def sources(self):

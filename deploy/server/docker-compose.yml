@@ -1,0 +1,89 @@
+# A public, always-on Bayesian IDS: the dashboard plus Caddy for HTTPS.
+#
+#   cd deploy/server
+#   cp .env.example .env          # set IDS_DOMAIN at least
+#   docker compose run --rm ids python manage_users.py add alice --role admin
+#   docker compose up -d --build
+#
+# or run  sudo ./install.sh  on a fresh Ubuntu/Debian server, which does all of it.
+#
+# How the two containers meet: they share a private network. Only Caddy publishes ports (80 and
+# 443); the dashboard is reachable from nowhere else. The dashboard believes X-Forwarded-For only
+# from that private network, so client addresses stay real and the login lockout works per client.
+# Either container can restart on its own (the dashboard's Restart button does) without the other
+# losing it.
+services:
+  ids:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        # no packet capture on a public server: no file capabilities on python, none needed at run time
+        CAPTURE: "false"
+    image: bayesian-ids-server
+    restart: unless-stopped
+
+    # the server refuses to start without an account, and over plain HTTP: both hold here
+    command:
+      - python
+      - serve.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --behind-proxy
+      - --proxy-ip
+      - ${IDS_SUBNET:-172.29.77.0/24}
+
+    environment:
+      IDS_CORS_ORIGINS: ${IDS_CORS_ORIGINS:-}
+      IDS_ADMIN_TOKEN: ${IDS_ADMIN_TOKEN:-}
+      IDS_API_KEY: ${IDS_API_KEY:-}
+      IDS_SECRET_KEY: ${IDS_SECRET_KEY:-}
+      IDS_MAX_UPLOAD_MB: ${IDS_MAX_UPLOAD_MB:-4096}
+
+    # least privilege: no Linux capabilities at all, and nothing can gain more
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    volumes:
+      - ids-data:/data
+
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2.11
+    restart: unless-stopped
+    depends_on:
+      ids:
+        condition: service_healthy
+
+    environment:
+      IDS_DOMAIN: ${IDS_DOMAIN:?set IDS_DOMAIN in .env (the name people will open)}
+      IDS_UPLOAD_LIMIT: ${IDS_UPLOAD_LIMIT:-4GB}
+
+    ports:
+      - "${IDS_HTTP_PORT:-80}:80"
+      - "${IDS_HTTPS_PORT:-443}:443"
+
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+    networks:
+      - internal
+
+networks:
+  internal:
+    ipam:
+      config:
+        - subnet: ${IDS_SUBNET:-172.29.77.0/24}
+
+volumes:
+  ids-data:
+  caddy-data:
+  caddy-config:

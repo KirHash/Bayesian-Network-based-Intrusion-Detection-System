@@ -18,3 +18,4 @@ proxy/bin/
 .env
 .env.*
 !.env.example
+docs/

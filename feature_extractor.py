@@ -69,22 +69,29 @@ def node_name(column):
     return re.sub(r"\W+", "_", column).strip("_")
 
 
-def port_category(port):
-    """0 HTTP, 1 HTTPS, 2 8080, 3 DNS, 4 other well-known, 5 registered, 6 ephemeral."""
+# Port categories. Scheme 1 (models trained before FTP and SSH brute force were in the data) lumps
+# every other well-known port together; scheme 2 gives FTP (21) and SSH (22) their own category,
+# which is what tells the two brute-force attacks apart. A saved model keeps its own scheme.
+PORT_SCHEME = 2
+
+
+def port_category(port, scheme=PORT_SCHEME):
+    """Scheme 2: 0 HTTP, 1 HTTPS, 2 8080, 3 DNS, 4 FTP, 5 SSH, 6 other well-known, 7 registered,
+    8 ephemeral. Scheme 1: 0 HTTP, 1 HTTPS, 2 8080, 3 DNS, 4 other well-known, 5 registered, 6 ephemeral."""
 
     port = np.asarray(port)
 
+    if scheme == 1:
+        return np.select(
+            [port == 80, port == 443, port == 8080, port == 53, port < 1024, port < 49152],
+            [0, 1, 2, 3, 4, 5],
+            default=6
+        )
+
     return np.select(
-        [
-            port == 80,
-            port == 443,
-            port == 8080,
-            port == 53,
-            port < 1024,
-            port < 49152
-        ],
-        [0, 1, 2, 3, 4, 5],
-        default=6
+        [port == 80, port == 443, port == 8080, port == 53, port == 21, port == 22, port < 1024, port < 49152],
+        [0, 1, 2, 3, 4, 5, 6, 7],
+        default=8
     )
 
 
@@ -95,6 +102,8 @@ class Discretizer:
         self.quantiles = quantiles
 
         self.edges = {}
+
+        self.port_scheme = PORT_SCHEME
 
     def fit(self, df):
 
@@ -118,7 +127,8 @@ class Discretizer:
         for column in FEATURES:
 
             if column == "Destination Port":
-                values = port_category(df[column])
+                # models saved before the scheme existed have no such attribute: they use scheme 1
+                values = port_category(df[column], getattr(self, "port_scheme", 1))
             else:
                 values = np.searchsorted(
                     self.edges[column],
@@ -129,14 +139,3 @@ class Discretizer:
             data[node_name(column)] = values.astype(int)
 
         return pd.DataFrame(data, index=df.index)
-
-
-def extract_evidence(row, discretizer):
-    """Evidence dict for a single flow (a pandas row)."""
-
-    frame = discretizer.transform(row.to_frame().T.astype(float))
-
-    return {
-        name: int(value)
-        for name, value in frame.iloc[0].items()
-    }

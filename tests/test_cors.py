@@ -1,6 +1,8 @@
 """The API answers browsers on a separate site (Netlify) only when told to, and only those sites."""
 import importlib
 
+import api_core
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -44,7 +46,7 @@ def client(tmp_path_factory):
 
 def test_only_well_formed_origins_are_kept(client):
 
-    assert client.api.cors_origins() == [SITE, "https://other.example:8443"]
+    assert api_core.cors_origins() == [SITE, "https://other.example:8443"]
 
 
 def test_preflight_from_an_allowed_site_is_answered_without_signing_in(client):

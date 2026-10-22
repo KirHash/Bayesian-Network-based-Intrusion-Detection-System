@@ -385,3 +385,134 @@ def test_the_proxy_launcher_explains_a_missing_install():
 def test_the_downloaded_proxy_binary_is_not_part_of_the_project_files():
 
     assert "proxy/bin/" in (ROOT / ".dockerignore").read_text().splitlines()
+
+
+# -- the always-on server stack (deploy/server) ------------------------------------------------------------
+
+SERVER = ROOT / "deploy" / "server"
+
+
+def server_compose():
+
+    import yaml
+
+    return yaml.safe_load((SERVER / "docker-compose.yml").read_text())
+
+
+def test_server_stack_puts_caddy_in_the_dashboards_network_so_client_addresses_stay_real():
+
+    stack = server_compose()
+
+    ids, caddy = stack["services"]["ids"], stack["services"]["caddy"]
+
+    # both sit on one private network; only Caddy publishes ports (80 and 443), never the dashboard's 8000
+    assert ids["networks"] == caddy["networks"] == ["internal"]
+    assert "network_mode" not in ids and "network_mode" not in caddy
+
+    published = " ".join(caddy["ports"])
+
+    assert ":80" in published and ":443" in published and "8000" not in published
+    assert "ports" not in ids
+
+    # the dashboard trusts X-Forwarded-For from that network (and only it), so client addresses stay real
+    command = ids["command"]
+
+    assert command[command.index("--proxy-ip") + 1] == "${IDS_SUBNET:-172.29.77.0/24}"
+    assert "--behind-proxy" in command and "0.0.0.0" in command
+
+    subnet = stack["networks"]["internal"]["ipam"]["config"][0]["subnet"]
+
+    assert subnet == "${IDS_SUBNET:-172.29.77.0/24}"
+
+
+def test_server_stack_runs_the_dashboard_with_no_privileges_and_no_capture_rights():
+
+    ids = server_compose()["services"]["ids"]
+
+    assert ids["cap_drop"] == ["ALL"] and "no-new-privileges:true" in ids["security_opt"]
+
+    # python carries file capabilities only in the capture build; a container without those
+    # capabilities cannot start such a binary at all
+    assert ids["build"]["args"]["CAPTURE"] == "false"
+
+    dockerfile = (ROOT / "deploy" / "docker" / "Dockerfile").read_text()
+
+    assert "ARG CAPTURE=true" in dockerfile and '"$CAPTURE" = "true"' in dockerfile
+
+
+def test_server_stack_restarts_waits_for_health_and_keeps_data_in_volumes():
+
+    stack = server_compose()
+
+    for name in ("ids", "caddy"):
+        assert stack["services"][name]["restart"] == "unless-stopped"
+
+    assert stack["services"]["caddy"]["depends_on"]["ids"]["condition"] == "service_healthy"
+
+    assert "ids-data:/data" in stack["services"]["ids"]["volumes"]
+    assert {"ids-data", "caddy-data", "caddy-config"} <= set(stack["volumes"])
+
+
+def test_server_stack_demands_a_domain_and_passes_no_secret_by_default():
+
+    text = (SERVER / "docker-compose.yml").read_text()
+
+    assert "${IDS_DOMAIN:?" in text
+
+    # secrets come from .env, never from the file itself
+    for name in ("IDS_ADMIN_TOKEN", "IDS_API_KEY", "IDS_SECRET_KEY"):
+        assert f"{name}: ${{{name}:-}}" in text
+
+
+def test_server_caddyfile_is_safe_and_streams():
+
+    caddyfile = (SERVER / "Caddyfile").read_text()
+
+    assert "{$IDS_DOMAIN} {" in caddyfile
+    assert "admin off" in caddyfile and "header -Server" in caddyfile
+    assert "reverse_proxy ids:8000" in caddyfile
+    assert "flush_interval -1" in caddyfile and "read_timeout 1h" in caddyfile
+
+    # automatic HTTPS stays on: no auto_https switch, no explicit "tls internal"
+    assert "auto_https" not in caddyfile.replace("# ", "") or "off" not in caddyfile
+
+
+def test_server_env_example_has_no_real_secrets_and_the_installer_refuses_unsafe_input():
+
+    example = (SERVER / ".env.example").read_text()
+
+    assert "IDS_DOMAIN=ids.example.com" in example
+
+    # every secret line is commented out and empty
+    for line in example.splitlines():
+        if re.match(r"\s*#?\s*IDS_(ADMIN_TOKEN|API_KEY|SECRET_KEY)=", line):
+            assert line.startswith("#") and line.rstrip().endswith("=")
+
+    script = (SERVER / "install.sh").read_text()
+
+    assert "set -euo pipefail" in script
+    assert 'id -u' in script and "bayesian_ids.pkl" in script
+    assert "ufw allow 80/tcp" in script and "ufw allow 443/tcp" in script and "8000" not in script.replace("(not 8000)", "")
+    assert "manage_users.py add" in script
+
+
+@pytest.mark.skipif(working_bash() is None, reason="needs a working bash")
+def test_server_installer_has_valid_shell_syntax_and_rejects_unknown_options():
+
+    assert subprocess.run([working_bash(), "-n", str(SERVER / "install.sh")]).returncode == 0
+
+    # unknown options are refused before anything is touched
+    done = subprocess.run([working_bash(), str(SERVER / "install.sh"), "--bogus"], capture_output=True, text=True)
+
+    assert done.returncode == 2 and "unknown option" in done.stderr
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="needs docker")
+def test_server_compose_file_is_valid_for_docker():
+
+    done = subprocess.run(
+        ["docker", "compose", "-f", str(SERVER / "docker-compose.yml"), "config", "-q"],
+        capture_output=True, text=True, env={**__import__("os").environ, "IDS_DOMAIN": "ids.example.com"}
+    )
+
+    assert done.returncode == 0, done.stderr

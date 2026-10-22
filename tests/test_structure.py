@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+from conftest import ROOT as ROOT_DIR
 from train_model import conditional_mutual_information, tan_edges
 
 
@@ -76,3 +77,47 @@ def test_env_file_fills_in_settings_without_overriding_real_ones(tmp_path):
     assert environ["IDS_DB"] == "a.db" and environ["IDS_DATA_DIR"] == "x y" and environ["IDS_API_KEY"] == "k"
     assert environ["IDS_ADMIN_TOKEN"] == "from-shell"
     assert envfile.load(tmp_path / "missing", {}) == []
+
+
+# -- continuous integration ----------------------------------------------------------------------------------------
+
+def test_the_ci_workflow_is_valid_and_only_runs_things_that_exist():
+
+    import yaml
+
+    root = ROOT_DIR
+
+    workflow = yaml.safe_load((root / ".github" / "workflows" / "ci.yml").read_text())
+
+    assert {"backend", "frontend", "audit", "docker"} <= set(workflow["jobs"])
+
+    # a push and a pull request both run it, with the least permissions it needs
+    assert "push" in workflow[True] and "pull_request" in workflow[True]      # PyYAML reads the key "on" as True
+    assert workflow["permissions"] == {"contents": "read"}
+
+    text = (root / ".github" / "workflows" / "ci.yml").read_text()
+
+    # the datasets are not in the repository: the CI run must not need them
+    assert 'pytest -q -m "not slow"' in text
+
+    # every file it names is there
+    for name in ("requirements.txt", "requirements-prod.txt", "frontend/package-lock.json",
+                 "deploy/docker/Dockerfile", "deploy/server/docker-compose.yml", "bayesian_ids.pkl"):
+        assert (root / name).exists(), name
+
+    # actions are pinned to a major version, never a moving branch
+    import re
+
+    for use in re.findall(r"uses: (\S+)", text):
+        assert re.search(r"@v\d+$", use), use
+
+
+def test_dependabot_watches_every_ecosystem_in_use():
+
+    import yaml
+
+    config = yaml.safe_load((ROOT_DIR / ".github" / "dependabot.yml").read_text())
+
+    watched = {u["package-ecosystem"] for u in config["updates"]}
+
+    assert {"pip", "npm", "github-actions", "docker"} <= watched

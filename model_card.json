@@ -1,16 +1,162 @@
 {
-  "trained_at": "2026-10-20T20:46:50",
+  "trained_at": "2026-10-21T23:34:58",
   "structure": "tan",
-  "training_rows": 982466,
+  "training_rows": 1403620,
   "classes": {
-    "BENIGN": 778695,
-    "PortScan": 111251,
-    "DDoS": 89618,
-    "Web Attack": 1526,
-    "Bot": 1376
+    "BENIGN": 546177,
+    "DDoS": 194618,
+    "Bot": 106376,
+    "DoS Hulk": 105000,
+    "PortScan": 105000,
+    "FTP-Patator": 105000,
+    "SSH-Patator": 105000,
+    "DoS Slowhttptest": 97923,
+    "DoS GoldenEye": 29055,
+    "DoS slowloris": 7692,
+    "Web Attack": 1779
   },
-  "threshold": 0.36999999999999994,
+  "threshold": 0.62,
   "anomaly_percentile": 99.5,
   "novelty_bins": 4,
-  "validation_f1": 0.9929
+  "validation_f1": 0.9979,
+  "test": {
+    "rows": 601558,
+    "precision": 0.9972,
+    "recall": 0.9965,
+    "f1": 0.9968,
+    "per_label": {
+      "BENIGN": {
+        "flows": 234078,
+        "flagged": 0.0043,
+        "typed_correctly": 0.9957
+      },
+      "Bot": {
+        "flows": 45590,
+        "flagged": 0.9921,
+        "typed_correctly": 0.9744
+      },
+      "DDoS": {
+        "flows": 83409,
+        "flagged": 0.995,
+        "typed_correctly": 0.995
+      },
+      "DoS GoldenEye": {
+        "flows": 12453,
+        "flagged": 0.999,
+        "typed_correctly": 0.9978
+      },
+      "DoS Hulk": {
+        "flows": 45000,
+        "flagged": 1.0,
+        "typed_correctly": 0.9998
+      },
+      "DoS Slowhttptest": {
+        "flows": 41967,
+        "flagged": 1.0,
+        "typed_correctly": 0.8804
+      },
+      "DoS slowloris": {
+        "flows": 3298,
+        "flagged": 0.9836,
+        "typed_correctly": 0.9836
+      },
+      "FTP-Patator": {
+        "flows": 45000,
+        "flagged": 1.0,
+        "typed_correctly": 0.5058
+      },
+      "PortScan": {
+        "flows": 45000,
+        "flagged": 0.9936,
+        "typed_correctly": 0.9928
+      },
+      "SSH-Patator": {
+        "flows": 45000,
+        "flagged": 0.9998,
+        "typed_correctly": 0.9993
+      },
+      "Web Attack": {
+        "flows": 763,
+        "flagged": 0.7798,
+        "typed_correctly": 0.7798
+      }
+    }
+  },
+  "test_without_forest": {
+    "rows": 601558,
+    "precision": 0.9933,
+    "recall": 0.9965,
+    "f1": 0.9949,
+    "per_label": {
+      "BENIGN": {
+        "flows": 234078,
+        "flagged": 0.0105,
+        "typed_correctly": 0.9895
+      },
+      "Bot": {
+        "flows": 45590,
+        "flagged": 0.9921,
+        "typed_correctly": 0.9744
+      },
+      "DDoS": {
+        "flows": 83409,
+        "flagged": 0.9951,
+        "typed_correctly": 0.995
+      },
+      "DoS GoldenEye": {
+        "flows": 12453,
+        "flagged": 0.999,
+        "typed_correctly": 0.9978
+      },
+      "DoS Hulk": {
+        "flows": 45000,
+        "flagged": 1.0,
+        "typed_correctly": 0.9998
+      },
+      "DoS Slowhttptest": {
+        "flows": 41967,
+        "flagged": 1.0,
+        "typed_correctly": 0.8804
+      },
+      "DoS slowloris": {
+        "flows": 3298,
+        "flagged": 0.9836,
+        "typed_correctly": 0.9836
+      },
+      "FTP-Patator": {
+        "flows": 45000,
+        "flagged": 1.0,
+        "typed_correctly": 0.5058
+      },
+      "PortScan": {
+        "flows": 45000,
+        "flagged": 0.9936,
+        "typed_correctly": 0.9928
+      },
+      "SSH-Patator": {
+        "flows": 45000,
+        "flagged": 0.9998,
+        "typed_correctly": 0.9993
+      },
+      "Web Attack": {
+        "flows": 763,
+        "flagged": 0.8021,
+        "typed_correctly": 0.8021
+      }
+    }
+  },
+  "forest": {
+    "trees": 30,
+    "threshold": 0.45,
+    "validation_f1": 0.9987,
+    "overruled_alerts": 1471,
+    "overruled_true_attacks": 19
+  },
+  "libraries": {
+    "numpy": "2.3.4",
+    "pandas": "2.3.3",
+    "scipy": "1.17.1",
+    "scikit-learn": "1.9.0",
+    "pgmpy": "1.1.2"
+  }
 }

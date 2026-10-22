@@ -22,6 +22,7 @@ from sklearn.tree import DecisionTreeClassifier
 from data_loader import load_all, train_val_test_split
 from detector import Detector
 from feature_extractor import FEATURES
+from forest_engine import fit_forest
 from train_model import fit_bundle
 
 frames = load_all()
@@ -75,13 +76,25 @@ def record(name, seconds_fit, predict, columns_note):
     print(f"done: {name}", flush=True)
 
 
-# Bayesian network, as shipped (classifier + novelty model)
-detector = Detector()
+# Bayesian network without and with the forest's confirmation (the shipped system has it)
+detector = Detector(use_forest=False)
+
+shipped = Detector(use_forest=True)
 
 
 def bayes(df):
 
     result = detector.score(df)
+
+    return (
+        np.where(result["prediction"] == "ATTACK", "ATTACK", "BENIGN"),
+        result["probability"].values
+    )
+
+
+def bayes_with_forest(df):
+
+    result = shipped.score(df)
 
     return (
         np.where(result["prediction"] == "ATTACK", "ATTACK", "BENIGN"),
@@ -110,6 +123,17 @@ fit_bundle(train, "tan")
 bayes_seconds = time.time() - start
 
 record("Bayesian network (classifier + novelty)", 2 * bayes_seconds, bayes, str(len(FEATURES)))
+
+if shipped.forest:
+
+    start = time.time()
+
+    fit_forest(train)
+
+    record(
+        "This system: network + forest + novelty", 2 * bayes_seconds + time.time() - start,
+        bayes_with_forest, str(len(FEATURES))
+    )
 
 record(
     "Bayesian network (classifier only)", bayes_seconds, bayes_classifier_only, str(len(FEATURES))
@@ -150,7 +174,7 @@ sklearn_model(
     "Logistic regression",
     make_pipeline(
         StandardScaler(),
-        LogisticRegression(max_iter=300)
+        make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000))
     ),
     FEATURES, str(len(FEATURES))
 )

@@ -139,6 +139,15 @@ export default function ModelPanel({ revision, liveJob }) {
 
   const test = card.test;
 
+  const forest = model?.forest;
+
+  const plain = card.test_without_forest;
+
+  const setForest = (confirm) =>
+    act(async () => {
+      await send("/api/model/forest", "PUT", { confirm });
+    });
+
   return (
     <div className="card">
       <div className="card-head">
@@ -206,6 +215,46 @@ export default function ModelPanel({ revision, liveJob }) {
             No held-out results are stored with this model. Retrain to get them.
           </div>
         )
+      )}
+
+      {model?.library_mismatch && Object.keys(model.library_mismatch).length > 0 && (
+        <div className="warnbox">
+          <b>This model was trained with other library versions than the ones installed</b>:{" "}
+          {Object.entries(model.library_mismatch)
+            .map(([name, v]) => `${name} ${v.trained} → ${v.installed}`)
+            .join(", ")}
+          . It still loads, but results can differ and a newer library may stop reading it. Retrain to be safe.
+        </div>
+      )}
+
+      {forest?.available && (
+        <div className="forest-box">
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={forest.confirm}
+              disabled={busy}
+              onChange={(e) => setForest(e.target.checked)}
+            />
+            <span>
+              <b>Second opinion from a random forest</b>
+              <span className="muted small-text">
+                {" "}
+                Alerts from the classifier are kept only when the forest agrees. Its rating is shown on
+                every alert either way.
+              </span>
+            </span>
+          </label>
+
+          {test && plain && (
+            <div className="muted small-text">
+              Held-out test: with the forest precision {pct(test.precision)}, recall {pct(test.recall)}; the
+              network alone {pct(plain.precision)} / {pct(plain.recall)}.
+              {card.forest &&
+                ` It overruled ${card.forest.overruled_alerts.toLocaleString()} alerts, of which ${card.forest.overruled_true_attacks.toLocaleString()} were real attacks.`}
+            </div>
+          )}
+        </div>
       )}
 
       <div className="capture-actions wrap">

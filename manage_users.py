@@ -5,6 +5,7 @@ Manage dashboard accounts from the command line.
     python manage_users.py list
     python manage_users.py passwd alice
     python manage_users.py role alice analyst
+    python manage_users.py 2fa-reset alice        (a lost phone: turns two-factor sign-in off)
     python manage_users.py disable alice          (enable to undo)
     python manage_users.py remove alice
 
@@ -58,6 +59,10 @@ def run(args, accounts, password_reader=read_password, out=print):
             accounts.set_password(args.username, password_reader("New password: "))
             out("Password changed; that user's sessions were ended.")
 
+        elif args.command == "2fa-reset":
+            accounts.disable_two_factor(args.username)
+            out(f"Two-factor sign-in is off for {args.username}; they can set it up again.")
+
         elif args.command == "role":
             accounts.set_role(args.username, args.role)
             out(f"{args.username} is now {args.role}.")
@@ -89,7 +94,7 @@ def parser():
 
     commands.add_parser("list", help="show accounts")
 
-    for name in ("passwd", "disable", "enable", "remove"):
+    for name in ("passwd", "disable", "enable", "remove", "2fa-reset"):
         commands.add_parser(name).add_argument("username")
 
     role = commands.add_parser("role", help="change an account's role")

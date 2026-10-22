@@ -17,7 +17,7 @@ import files
 import lifecycle
 import logbuffer
 import relaunch
-from jobs import Job, JobBusy, JobManager
+from jobs import JobBusy, JobManager
 from notifier import Notifier, SettingsError, build_settings, masked, runtime_config
 from secrets_store import SecretBox
 from storage import Store

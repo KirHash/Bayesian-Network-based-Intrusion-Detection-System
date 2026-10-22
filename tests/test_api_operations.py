@@ -19,6 +19,8 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+import lifecycle
+
 from conftest import ROOT, needs_model, write_pcap
 from feature_extractor import FEATURES
 
@@ -394,8 +396,8 @@ def test_rolling_back_restores_the_previous_model(client):
 
     assert older != current
 
-    # the real model had five classes; the synthetic one two
-    assert len(rolled.json()["classes"]) == 5
+    # the real model knows many attack types; the synthetic one two
+    assert len(rolled.json()["classes"]) > 5
 
     # rolling back again swaps forward
     assert client.post("/api/model/rollback").json()["card"]["trained_at"] == current
@@ -595,7 +597,7 @@ def test_restart_is_requested_after_the_response(client, monkeypatch):
 
     called = threading.Event()
 
-    monkeypatch.setattr(client.api.lifecycle, "restart", called.set)
+    monkeypatch.setattr(lifecycle, "restart", called.set)
 
     response = client.post("/api/server/restart")
 
@@ -680,7 +682,7 @@ ADMIN_ONLY = [
 def test_only_admins_reach_the_operations_endpoints(client, monkeypatch):
 
     # (a restart or a start-at-login request must not really run if one slips through)
-    monkeypatch.setattr(client.api.lifecycle, "restart", lambda: None)
+    monkeypatch.setattr(lifecycle, "restart", lambda: None)
 
     admin = client.post("/api/users", json={"username": "root", "password": PASSWORD, "role": "admin"})
 

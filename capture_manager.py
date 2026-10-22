@@ -22,7 +22,7 @@ from pathlib import Path
 import pandas as pd
 from scapy.sendrecv import AsyncSniffer
 
-from flow_features import FlowTable
+from flow_features import FlowTable, local_broadcasts
 from live_monitor import follow
 from platform_check import diagnose
 
@@ -336,7 +336,7 @@ class CaptureManager:
     def run_sniffer(self, mode, target, stop):
         """Live interface or pcap file. Returns "finished" or "stopped"."""
 
-        table = FlowTable(idle_timeout=self.idle_timeout)
+        table = FlowTable(idle_timeout=self.idle_timeout, ignore_groups=True, broadcasts=local_broadcasts())
 
         lock = threading.Lock()
 

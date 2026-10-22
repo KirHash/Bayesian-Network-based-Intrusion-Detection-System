@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { getToken, unauthorized } from "./api.js";
+import { send, unauthorized } from "./api.js";
 import { wsUrl } from "./config.js";
 
 const MAX_TICKS = 360;
@@ -28,10 +28,22 @@ export default function useLive() {
 
     const bump = () => setRevision((r) => r + 1);
 
-    const connect = () => {
-      const token = getToken();
-      const query = token ? `?token=${encodeURIComponent(token)}` : "";
-      const ws = new WebSocket(wsUrl(`/ws${query}`));
+    const connect = async () => {
+      // the feed opens with a one-time ticket, never with the session token itself (an address
+      // ends up in logs and browser history)
+      let ticket = "";
+
+      try {
+        ticket = (await send("/api/ws-ticket", "POST")).ticket;
+      } catch {
+        if (!closed) retry = setTimeout(connect, 2000);
+
+        return;
+      }
+
+      if (closed) return;
+
+      const ws = new WebSocket(wsUrl(`/ws?ticket=${encodeURIComponent(ticket)}`));
       socket.current = ws;
 
       ws.onopen = () => {

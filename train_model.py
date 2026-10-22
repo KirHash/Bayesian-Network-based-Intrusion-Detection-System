@@ -23,7 +23,12 @@ from bayesian_engine import (
     calibrated_logodds,
     model_path
 )
-from detector import Detector
+from detector import Detector, library_versions
+from forest_engine import (
+    attack_probability,
+    best_confirmation_threshold,
+    fit_forest
+)
 
 STRUCTURE_SAMPLE = 300000
 
@@ -252,10 +257,10 @@ def benign_reference(bundle, train):
     return reference
 
 
-def test_metrics(bundle, test):
+def test_metrics(bundle, test, use_forest=True):
     """Held-out results the dashboard shows next to the model."""
 
-    result = Detector(bundle).score(test)
+    result = Detector(bundle, use_forest=use_forest).score(test)
 
     actual = (test["Label"] != "BENIGN").astype(int).values
     flagged = (result["prediction"] == "ATTACK").astype(int).values
@@ -325,6 +330,26 @@ if __name__ == "__main__":
         f"risk bands {bands}  ({time.time() - start:.0f}s)"
     )
 
+    # Second opinion: a forest fitted on the same fit rows, its confirmation threshold
+    # tuned on the same validation flows (novelty alerts are not part of this search)
+    start = time.time()
+
+    trial = fit_forest(fit)
+
+    raw = expit(calibrated_logodds(bundle, val)) > threshold
+
+    forest_threshold, forest_f1 = best_confirmation_threshold(
+        raw,
+        attack_probability(trial, val),
+        np.zeros(len(val), dtype=bool),
+        (val["Label"] != "BENIGN").values
+    )
+
+    print(
+        f"[forest] confirmation threshold {forest_threshold}  "
+        f"validation F1 {forest_f1:.4f} (network alone {f1:.4f})  ({time.time() - start:.0f}s)"
+    )
+
     # Refit on fit + validation, keep what was tuned above
     train = pd.concat([fit, val], ignore_index=True)
 
@@ -347,6 +372,12 @@ if __name__ == "__main__":
 
     final["novelty"] = novelty
 
+    final["forest"] = {
+        **fit_forest(train),
+        "threshold": forest_threshold,
+        "validation_f1": round(forest_f1, 4)
+    }
+
     final["reference"] = benign_reference(final, train)
 
     final["card"] = {
@@ -357,7 +388,8 @@ if __name__ == "__main__":
         "threshold": threshold,
         "anomaly_percentile": ANOMALY_PERCENTILE,
         "novelty_bins": len(NOVELTY_QUANTILES) + 1,
-        "validation_f1": round(f1, 4)
+        "validation_f1": round(f1, 4),
+        "libraries": library_versions()
     }
 
     print(
@@ -368,9 +400,30 @@ if __name__ == "__main__":
     # How it does on flows it never saw (the last 30% of every capture)
     final["card"]["test"] = test_metrics(final, test)
 
+    # What the second opinion changed on the held-out flows
+    final["card"]["test_without_forest"] = test_metrics(final, test, use_forest=False)
+
+    judged = Detector(final).score(test)
+
+    attacks = (test["Label"] != "BENIGN").values
+
+    final["card"]["forest"] = {
+        "trees": len(final["forest"]["model"].estimators_),
+        "threshold": forest_threshold,
+        "validation_f1": round(forest_f1, 4),
+        "overruled_alerts": int(judged["overruled"].sum()),
+        "overruled_true_attacks": int((judged["overruled"].values & attacks).sum())
+    }
+
     print(
         "Held-out test: precision {precision}, recall {recall}, "
         "F1 {f1} on {rows} flows".format(**final["card"]["test"])
+    )
+
+    print(
+        "Without the forest: precision {precision}, recall {recall}, F1 {f1}".format(
+            **final["card"]["test_without_forest"]
+        )
     )
 
     save_model(final, model_path())

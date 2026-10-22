@@ -361,10 +361,39 @@ def test_the_websocket_needs_a_session(client):
         with client.websocket_connect("/ws") as ws:
             ws.receive_json()
 
-    token = sign_in(client, "vera")["Authorization"].removeprefix("Bearer ")
+    headers = sign_in(client, "vera")
 
-    with client.websocket_connect(f"/ws?token={token}") as ws:
+    token = headers["Authorization"].removeprefix("Bearer ")
+
+    # the session token itself never opens the feed (it would sit in logs and history) ...
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/ws?token={token}") as ws:
+            ws.receive_json()
+
+    # ... a ticket does, once
+    ticket = client.post("/api/ws-ticket", headers=headers).json()["ticket"]
+
+    with client.websocket_connect(f"/ws?ticket={ticket}") as ws:
         assert ws.receive_json()["type"] == "hello"
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/ws?ticket={ticket}") as ws:
+            ws.receive_json()
+
+    # tickets are only for people who are signed in, and expire
+    assert client.post("/api/ws-ticket").status_code == 401
+
+    import api
+
+    stale = client.post("/api/ws-ticket", headers=headers).json()["ticket"]
+
+    who, _ = api.hub.tickets[stale]
+
+    api.hub.tickets[stale] = (who, 0)
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/ws?ticket={stale}") as ws:
+            ws.receive_json()
 
 
 def test_flow_exporters_are_unaffected_by_logins(client):
@@ -436,3 +465,10 @@ def test_hsts_is_added_when_the_connection_is_encrypted(client):
     proxied = client.get("/api/healthz", headers={"X-Forwarded-Proto": "https"})
 
     assert "max-age" in proxied.headers["strict-transport-security"]
+
+
+def test_monitors_may_ask_the_health_endpoint_with_head(client):
+
+    # uptime services use HEAD; it needs no sign-in, like GET
+    assert client.head("/api/healthz").status_code == 200
+    assert client.get("/api/healthz").status_code == 200

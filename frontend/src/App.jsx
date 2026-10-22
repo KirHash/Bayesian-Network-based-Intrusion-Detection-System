@@ -3,16 +3,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getJSON, getToken, send, setToken } from "./api.js";
 import { useAuth } from "./auth.js";
 import useLive, { useRefresh } from "./useLive.js";
-import Header from "./components/Header.jsx";
-import Kpis from "./components/Kpis.jsx";
+import { ServerNote } from "./components/ConnectGate.jsx";
+import AccountPanel from "./components/AccountPanel.jsx";
+import DriftPage from "./components/DriftPage.jsx";
+import Overview from "./components/Overview.jsx";
+import Sidebar from "./components/Sidebar.jsx";
+import Topbar from "./components/Topbar.jsx";
 import AlertTable from "./components/AlertTable.jsx";
 import FlowsTable from "./components/FlowsTable.jsx";
-import SourcesCard from "./components/SourcesCard.jsx";
 import Operations from "./components/Operations.jsx";
 import AlertDrawer from "./components/AlertDrawer.jsx";
-import DriftCard from "./components/DriftCard.jsx";
-import NotificationsCard from "./components/NotificationsCard.jsx";
-import { RiskBars, Timeline, TypeDonut } from "./components/Charts.jsx";
 
 const initialAlert = () => {
   const id = Number(new URLSearchParams(location.search).get("alert"));
@@ -27,19 +27,37 @@ export default function App() {
   const [model, setModel] = useState(null);
   const [stats, setStats] = useState(null);
   const [browserAlerts, setBrowserAlerts] = useState(false);
-  // admins also get an Operations page (#operations), kept across reloads
-  const [page, setPage] = useState(() =>
-    location.hash === "#operations" && auth.isAdmin ? "operations" : "monitor"
-  );
+  const PAGES = ["overview", "alerts", "flows", "drift", "account", "operations"];
+
+  const startPage = () => {
+    const fromHash = location.hash.slice(1);
+
+    if (fromHash === "operations") return auth.isAdmin ? "operations" : "overview";
+
+    if (PAGES.includes(fromHash)) return fromHash;
+
+    const query = new URLSearchParams(location.search);
+
+    if (query.get("alert")) return "alerts";
+
+    return query.get("view") === "flows" ? "flows" : "overview";
+  };
+
+  const [page, setPage] = useState(startPage);
+
+  // the browser's back/forward buttons and links to #operations, #account... follow the address
+  useEffect(() => {
+    const follow = () => setPage(startPage());
+
+    window.addEventListener("hashchange", follow);
+
+    return () => window.removeEventListener("hashchange", follow);
+  });
 
   const goTo = (next) => {
     setPage(next);
-    history.replaceState(null, "", next === "operations" ? "#operations" : location.pathname + location.search);
+    history.replaceState(null, "", next === "overview" ? location.pathname + location.search : `#${next}`);
   };
-
-  const [view, setView] = useState(() =>
-    new URLSearchParams(location.search).get("view") === "flows" ? "flows" : "alerts"
-  );
 
   useEffect(() => {
     getJSON("/api/model").then(setModel).catch(() => {});
@@ -91,83 +109,51 @@ export default function App() {
 
   const types = Object.keys(stats?.by_type || {}).sort();
 
+  const waiting = (stats?.by_status?.new || 0) + (stats?.by_status?.investigating || 0);
+
   return (
-    <div className="app">
-      <Header
-        model={model}
-        connected={live.connected}
-        source={source}
-        onSource={setSource}
-        replay={live.replay}
-        onReplay={setReplay}
-        onReset={() => send("/api/reset", "POST").catch(() => {})}
+    <div className="shell">
+      <Sidebar
         page={page}
         onPage={goTo}
-        user={auth.open ? null : { name: auth.user, role: auth.role }}
         isAdmin={auth.isAdmin}
-        onSignOut={getToken() ? signOut : null}
+        connected={live.connected}
+        openAlerts={waiting}
       />
 
-      {model?.trained === false && page === "monitor" && (
-        <div className="warnbox">
-          <b>No model has been trained yet</b>, so nothing can be scored.{" "}
-          {auth.isAdmin ? (
-            <button className="link" onClick={() => goTo("operations")}>
-              Open Operations to train one
-            </button>
-          ) : (
-            "Ask an administrator to train one."
-          )}
-        </div>
-      )}
+      <div className="workspace">
+        <Topbar
+          page={page}
+          model={model}
+          source={source}
+          onSource={setSource}
+          replay={live.replay}
+          onReplay={setReplay}
+          onReset={() => send("/api/reset", "POST").catch(() => {})}
+          user={auth.open ? null : { name: auth.user, role: auth.role }}
+          isAdmin={auth.isAdmin}
+          onSignOut={getToken() ? signOut : null}
+        />
 
-      {page === "operations" && auth.isAdmin ? (
-        <Operations live={live} />
-      ) : (
-      <>
-      <Kpis stats={stats} />
-
-      <div className="grid">
-        <div className="card wide">
-          <div className="card-head">
-            <h2>Traffic per second</h2>
+        {model?.trained === false && (
+          <div className="warnbox">
+            <b>No model has been trained yet</b>, so nothing can be scored.{" "}
+            {auth.isAdmin ? (
+              <button className="link" onClick={() => goTo("operations")}>
+                Open Operations to train one
+              </button>
+            ) : (
+              "Ask an administrator to train one."
+            )}
           </div>
-          <Timeline ticks={live.ticks} source={source} />
-        </div>
+        )}
 
-        <div className="card">
-          <div className="card-head">
-            <h2>Alerts by type</h2>
-          </div>
-          <TypeDonut byType={stats?.by_type} />
-        </div>
-
-        <div className="card">
-          <div className="card-head">
-            <h2>Alerts by risk</h2>
-          </div>
-          <RiskBars byRisk={stats?.by_risk} />
-        </div>
-      </div>
-
-      <div className="split">
-        <div className="main">
-          <div className="tabs">
-            <button
-              className={view === "alerts" ? "tab active" : "tab"}
-              onClick={() => setView("alerts")}
-            >
-              Alerts
-            </button>
-            <button
-              className={view === "flows" ? "tab active" : "tab"}
-              onClick={() => setView("flows")}
-            >
-              Recent flows
-            </button>
-          </div>
-
-          {view === "alerts" ? (
+        <main>
+          {page === "operations" && auth.isAdmin ? (
+            <Operations live={live} />
+          ) : page === "account" ? (
+            <AccountPanel />
+          ) : page === "alerts" ? (
             <AlertTable
               source={source}
               revision={live.revision}
@@ -175,34 +161,34 @@ export default function App() {
               onSelect={setSelected}
               types={types}
               flowsScored={stats?.total || 0}
-              onShowFlows={() => setView("flows")}
+              onShowFlows={() => goTo("flows")}
             />
+          ) : page === "drift" ? (
+            <DriftPage drift={live.drift} source={source} revision={live.revision} />
+          ) : page === "flows" ? (
+            <FlowsTable source={source} revision={live.revision} onSelect={setSelected} />
           ) : (
-            <FlowsTable
+            <Overview
+              live={live}
+              stats={stats}
               source={source}
-              revision={live.revision}
-              onSelect={setSelected}
+              onOpenAlerts={() => goTo("alerts")}
+              onOpenDrift={() => goTo("drift")}
+              browserAlerts={browserAlerts}
+              onBrowserAlerts={setBrowserAlerts}
             />
           )}
-        </div>
+        </main>
 
-        <div className="side">
-          <SourcesCard revision={live.revision} />
-          <DriftCard drift={live.drift} source={source} />
-          <NotificationsCard
-            browserAlerts={browserAlerts}
-            onBrowserAlerts={setBrowserAlerts}
-          />
-        </div>
+        <ServerNote />
       </div>
-      </>
-      )}
 
       <AlertDrawer
         alertId={selected}
         revision={live.revision}
         onClose={close}
       />
+
     </div>
   );
 }

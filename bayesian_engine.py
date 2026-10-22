@@ -2,7 +2,7 @@ import os
 import pickle
 
 import numpy as np
-from scipy.special import expit, logsumexp
+from scipy.special import logsumexp
 
 
 def model_path():
@@ -120,16 +120,3 @@ def calibrated_logodds(bundle, df):
         calibration["a"] * intrusion_logodds(bundle, df)
         + calibration["b"]
     )
-
-
-def intrusion_probability(bundle, df):
-    """Calibrated P(not BENIGN | evidence) per flow, as a numpy array."""
-
-    return expit(calibrated_logodds(bundle, df))
-
-
-def predicted_attack_type(bundle, df):
-
-    classes, post = attack_posteriors(bundle, df)
-
-    return np.array(classes)[post.argmax(axis=1)]

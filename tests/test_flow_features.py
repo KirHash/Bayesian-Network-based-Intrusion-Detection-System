@@ -190,3 +190,68 @@ def test_all_model_features_present_and_finite(http_flow):
     for name in FEATURES:
         assert name in http_flow
         assert math.isfinite(http_flow[name])
+
+
+# -- multicast and broadcast are not scored in live capture ------------------------------------------
+
+from flow_features import is_group_address, local_broadcasts
+
+
+@pytest.mark.parametrize("address, broadcasts, expected", [
+    ("239.255.255.250", (), True),            # SSDP
+    ("224.0.0.251", (), True),                # mDNS
+    ("255.255.255.255", (), True),
+    ("ff02::fb", (), True),
+    ("192.168.1.255", ("192.168.1.255",), True),
+    ("192.168.1.255", (), False),             # only a broadcast when the interface says so
+    ("192.168.1.20", ("192.168.1.255",), False),
+    ("8.8.8.8", (), False),
+    ("not an address", (), False),
+])
+def test_group_addresses(address, broadcasts, expected):
+
+    assert is_group_address(address, broadcasts) is expected
+
+
+def to_group(packet, dst):
+
+    packet = IP(bytes(IP(src=CLIENT, dst=dst) / UDP(sport=40000, dport=1900) / Raw(b"M-SEARCH")))
+    packet.time = 1.0
+
+    return packet
+
+
+def test_flows_to_group_addresses_are_skipped_only_when_asked():
+
+    ssdp = to_group(None, "239.255.255.250")
+
+    kept = FlowTable()
+    kept.add(ssdp)
+
+    assert len(kept.flows) == 1 and not kept.ignored
+
+    skipping = FlowTable(ignore_groups=True)
+    skipping.add(ssdp)
+
+    assert not skipping.flows and len(skipping.ignored) == 1
+
+    # ordinary traffic is untouched
+    skipping.add(udp(1.0, True, 20))
+
+    assert len(skipping.flows) == 1
+
+
+def test_the_interface_broadcast_is_skipped_too():
+
+    table = FlowTable(ignore_groups=True, broadcasts={"192.168.1.255"})
+
+    table.add(to_group(None, "192.168.1.255"))
+
+    assert not table.flows and len(table.ignored) == 1
+
+
+def test_this_machines_broadcast_addresses_are_found():
+
+    found = local_broadcasts()
+
+    assert all(a.count(".") == 3 for a in found)

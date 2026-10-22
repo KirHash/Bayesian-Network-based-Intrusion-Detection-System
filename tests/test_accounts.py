@@ -334,3 +334,84 @@ def test_cli_reports_mistakes_with_a_failing_exit_code(acc):
     assert code == 1 and "at least" in message
 
     assert cli(acc, "passwd", "ghost")[0] == 1
+
+
+# -- people changing their own sign-in details -----------------------------------------
+
+NEW_PASSWORD = "a different long password"
+
+
+def test_changing_your_own_password_keeps_you_signed_in_and_ends_the_old_sessions(acc, admin):
+
+    old_token, _ = acc.login("root", PASSWORD)
+
+    token, user = acc.change_own("root", PASSWORD, new_password=NEW_PASSWORD)
+
+    assert user["username"] == "root"
+    assert acc.resolve(old_token) is None
+    assert acc.resolve(token)["username"] == "root"
+
+    with pytest.raises(AccountError):
+        acc.login("root", PASSWORD)
+
+    acc.login("root", NEW_PASSWORD)
+
+
+def test_renaming_yourself_moves_the_account_and_keeps_its_role(acc, admin):
+
+    acc.create("vera", PASSWORD, "viewer")
+
+    token, user = acc.change_own("vera", PASSWORD, new_username="  Vera.K ")
+
+    assert user["username"] == "vera.k" and user["role"] == "viewer"
+    assert acc.resolve(token)["username"] == "vera.k"
+
+    assert acc.get("vera.k")["role"] == "viewer"
+
+    with pytest.raises(AccountError):
+        acc.get("vera")
+
+    acc.login("vera.k", PASSWORD)
+
+
+def test_both_can_change_at_once(acc, admin):
+
+    token, user = acc.change_own("root", PASSWORD, new_username="boss", new_password=NEW_PASSWORD)
+
+    assert user["username"] == "boss"
+
+    acc.login("boss", NEW_PASSWORD)
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    ({"new_password": "short"}, "at least"),
+    ({"new_username": "x"}, "usernames are"),
+    ({"new_username": "taken"}, "taken"),
+    ({}, "nothing to change"),
+    ({"new_password": PASSWORD}, "same as the current"),
+])
+def test_bad_changes_are_refused_and_change_nothing(acc, admin, kwargs, message):
+
+    acc.create("taken", PASSWORD, "viewer")
+
+    with pytest.raises(AccountError, match=message):
+        acc.change_own("root", PASSWORD, **kwargs)
+
+    # still signed up as before, with the same password
+    acc.login("root", PASSWORD)
+
+
+def test_a_wrong_current_password_changes_nothing_and_counts_as_a_failed_attempt(acc, admin):
+
+    with pytest.raises(AccountError, match="current password is wrong"):
+        acc.change_own("root", "not the password", new_password=NEW_PASSWORD)
+
+    acc.login("root", PASSWORD)
+
+    # guessing the current password is rate limited like signing in
+    for _ in range(MAX_FAILURES):
+        with pytest.raises(AccountError):
+            acc.change_own("root", "guess-guess-guess", new_password=NEW_PASSWORD)
+
+    with pytest.raises(Locked):
+        acc.change_own("root", PASSWORD, new_password=NEW_PASSWORD)

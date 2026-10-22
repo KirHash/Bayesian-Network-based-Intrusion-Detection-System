@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 
 import { getJSON, send } from "../api.js";
 import { useAuth } from "../auth.js";
+import AlertViews from "./AlertViews.jsx";
 import { useRefresh } from "../useLive.js";
 import {
   RISK_COLOR,
@@ -24,7 +25,7 @@ export function Badge({ color, children }) {
   );
 }
 
-/** ✓ when the verdict matches the replay's ground truth, ✗ when not. */
+/** Green when the verdict matches the replay ground truth, red when not. */
 function Verdict({ alert }) {
   if (alert.label === null) return <span className="muted">–</span>;
 
@@ -32,7 +33,7 @@ function Verdict({ alert }) {
 
   return (
     <span className={hit ? "ok" : "miss"} title={`Ground truth: ${alert.label}`}>
-      {hit ? "✓" : "✗"} {alert.label}
+      {alert.label}
     </span>
   );
 }
@@ -154,6 +155,17 @@ export default function AlertTable({
           </select>
         </div>
       </div>
+
+      <AlertViews
+        current={{ status, risk, type, query }}
+        source={source}
+        onApply={(view) => {
+          setStatus(view.status);
+          setRisk(view.risk);
+          setType(view.type);
+          setQuery(view.query);
+        }}
+      />
 
       {canHandle && checked.size > 0 && (
         <div className="bulk">

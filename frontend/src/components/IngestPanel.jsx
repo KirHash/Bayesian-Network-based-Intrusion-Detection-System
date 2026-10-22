@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { getJSON, send } from "../api.js";
-import { API_BASE } from "../config.js";
+import { getApiBase } from "../config.js";
 
 const SOURCE_TEXT = {
   environment: "required (set by IDS_API_KEY on the server)",
@@ -42,7 +42,7 @@ export default function IngestPanel({ revision }) {
     }
   };
 
-  const url = `${API_BASE || location.origin}/api/score`;
+  const url = `${getApiBase() || location.origin}/api/score`;
 
   const curl = [
     `curl -X POST "${url}"`,

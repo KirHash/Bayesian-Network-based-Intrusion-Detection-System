@@ -22,7 +22,7 @@ import urllib.request
 
 from scapy.sendrecv import AsyncSniffer
 
-from flow_features import FlowTable
+from flow_features import FlowTable, local_broadcasts
 
 BATCH = 500
 
@@ -159,7 +159,7 @@ def main():
     if not (args.pcap or args.iface):
         parser.error("give --pcap or --iface")
 
-    table = FlowTable(idle_timeout=args.idle_timeout)
+    table = FlowTable(idle_timeout=args.idle_timeout, ignore_groups=True, broadcasts=local_broadcasts())
 
     uplink = Uplink(args.api.rstrip("/"), args.api_key, args.csv)
 

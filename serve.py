@@ -68,19 +68,44 @@ def accounts_exist(db_path):
         return False
 
 
+def proxy_address(text):
+    """One trusted proxy: an address (10.0.0.5) or a private network (172.29.77.0/24).
+
+    A network is how a proxy in another container is trusted, since its address is not fixed.
+    "*" and networks so wide that they include strangers are refused: whoever is trusted can
+    claim any client address and slip past per-address protections such as the login lockout.
+    """
+
+    try:
+        network = ipaddress.ip_network(str(text).strip(), strict=False)
+    except ValueError:
+        raise ValueError(f"{text!r} is not an address or network (for example 10.0.0.5 or 172.29.77.0/24)")
+
+    narrowest = 8 if network.version == 4 else 16
+
+    if network.prefixlen < narrowest:
+        raise ValueError(f"{text!r} is too wide to trust: it would include far more than one proxy")
+
+    return str(network.network_address) if network.num_addresses == 1 else str(network)
+
+
 def trusted_proxies(extra=()):
-    """Addresses whose X-Forwarded-* headers are believed. Anyone else could
+    """Addresses (and networks) whose X-Forwarded-* headers are believed. Anyone else could
     claim any client address and slip past per-address protections such as
     the login lockout."""
 
-    return list(dict.fromkeys(["127.0.0.1", "::1", *extra]))
+    return list(dict.fromkeys(["127.0.0.1", "::1", *(proxy_address(item) for item in extra)]))
 
 
 def check(host, environ=os.environ, tls=False, behind_proxy=False,
-          has_accounts=None):
-    """Returns a message if this way of serving is unsafe, else None."""
+          has_accounts=None, public=False):
+    """Returns a message if this way of serving is unsafe, else None.
 
-    if is_local(host):
+    public: a tunnel or proxy makes this server reachable from the internet even
+    though it listens on this machine only, so sign-in is required regardless of host.
+    """
+
+    if is_local(host) and not public:
         return None
 
     if has_accounts is None:
@@ -88,8 +113,8 @@ def check(host, environ=os.environ, tls=False, behind_proxy=False,
 
     if not (environ.get("IDS_ADMIN_TOKEN") or has_accounts):
         return (
-            f"Refusing to listen on {host} with no way to sign in: anyone who "
-            "can reach the port could start packet capture and change "
+            f"Refusing to serve {'publicly' if public else 'on ' + host} with no way to sign in: "
+            "anyone who can reach the site could start packet capture and change "
             "settings.\nCreate an account first:\n"
             "    python manage_users.py add alice --role admin\n"
             "or set IDS_ADMIN_TOKEN."
@@ -263,9 +288,13 @@ def main(argv=None):
                         help="extra host name or IP for the self-signed certificate")
     parser.add_argument("--behind-proxy", action="store_true",
                         help="a reverse proxy in front of this server provides HTTPS")
+    parser.add_argument("--public", action="store_true",
+                        help="a tunnel or proxy exposes this server to the internet: "
+                             "implies --behind-proxy and refuses to start without accounts")
     parser.add_argument("--proxy-ip", action="append", default=[],
-                        help="address the proxy connects from (default 127.0.0.1 and ::1); "
-                             "X-Forwarded-For is believed only from these")
+                        help="address or private network the proxy connects from, e.g. 10.0.0.5 or "
+                             "172.29.77.0/24 (default 127.0.0.1 and ::1); X-Forwarded-For is believed "
+                             "only from these")
 
     args = parser.parse_args(argv)
 
@@ -285,7 +314,14 @@ def main(argv=None):
         print(f"Self-signed certificate: {cert}")
         print(f"SHA-256 fingerprint:     {fingerprint(cert)}")
 
-    problem = check(args.host, tls=bool(cert), behind_proxy=args.behind_proxy)
+    args.behind_proxy = args.behind_proxy or args.public
+
+    try:
+        proxies = trusted_proxies(args.proxy_ip)
+    except ValueError as error:
+        sys.exit(f"--proxy-ip: {error}")
+
+    problem = check(args.host, tls=bool(cert), behind_proxy=args.behind_proxy, public=args.public)
 
     if problem:
         sys.exit(problem)
@@ -297,7 +333,7 @@ def main(argv=None):
         ssl_certfile=cert,
         ssl_keyfile=key,
         proxy_headers=args.behind_proxy,
-        forwarded_allow_ips=",".join(trusted_proxies(args.proxy_ip)) if args.behind_proxy else None,
+        forwarded_allow_ips=",".join(proxies) if args.behind_proxy else None,
         # the default "websockets" implementation is deprecated upstream
         ws="websockets-sansio",
         # do not announce the server software in every response

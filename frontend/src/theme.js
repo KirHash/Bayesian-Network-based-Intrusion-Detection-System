@@ -1,19 +1,30 @@
 export const RISK_ORDER = ["Critical", "High", "Medium", "Low"];
 
+// Colour goes on what needs a decision: the risk bands. Attack types are told apart by lightness
+// (one neutral ramp, the accent blue on the commonest family), never by a hue each.
 export const RISK_COLOR = {
-  Critical: "#ff5370",
-  High: "#ff9f43",
-  Medium: "#f7d154",
-  Low: "#4cc38a"
+  Critical: "#e5566f",
+  High: "#d9a441",
+  Medium: "#8a8c92",
+  Low: "#44a282"
 };
 
+const RAMP = ["#f2f2f3", "#4a8ad6", "#c4c4c8", "#9a9ca2", "#74767c", "#575960"];
+
 export const TYPE_COLOR = {
-  DDoS: "#ff5370",
-  PortScan: "#4dabf7",
-  "Web Attack": "#b197fc",
-  Bot: "#ffa94d",
-  Anomaly: "#f7d154",
-  BENIGN: "#4cc38a"
+  DDoS: RAMP[0],
+  PortScan: RAMP[1],
+  "Web Attack": RAMP[2],
+  Bot: RAMP[3],
+  Anomaly: RAMP[4],
+  "DoS Hulk": RAMP[0],
+  "DoS GoldenEye": RAMP[2],
+  "DoS slowloris": RAMP[3],
+  "DoS Slowhttptest": RAMP[4],
+  "FTP-Patator": RAMP[5],
+  "SSH-Patator": RAMP[1],
+  Infiltration: RAMP[5],
+  BENIGN: "#44a282"
 };
 
 export const STATUS_LABEL = {
@@ -24,10 +35,10 @@ export const STATUS_LABEL = {
 };
 
 export const STATUS_COLOR = {
-  new: "#4dabf7",
-  investigating: "#f7d154",
-  resolved: "#4cc38a",
-  false_positive: "#8b95a7"
+  new: "#4a8ad6",
+  investigating: "#d9a441",
+  resolved: "#44a282",
+  false_positive: "#74767c"
 };
 
 export const SOURCE_LABEL = {
@@ -37,7 +48,7 @@ export const SOURCE_LABEL = {
   replay: "Demo replay"
 };
 
-export const typeColor = (type) => TYPE_COLOR[type] || "#8b95a7";
+export const typeColor = (type) => TYPE_COLOR[type] || "#8a8c92";
 
 export const pct = (value, digits = 1) =>
   value === null || value === undefined

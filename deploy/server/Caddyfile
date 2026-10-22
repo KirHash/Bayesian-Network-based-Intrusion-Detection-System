@@ -1,0 +1,37 @@
+# Caddy for the always-on server (see docker-compose.yml).
+#
+#   IDS_DOMAIN        the name people open, e.g. ids.example.com or myids.duckdns.org.
+#                     Caddy gets and renews a Let's Encrypt certificate for it by itself;
+#                     ports 80 and 443 must reach this machine and the name must point at it.
+#                     "localhost" gives a certificate from Caddy's own local CA instead
+#                     (for trying the stack on your own computer).
+#   IDS_UPLOAD_LIMIT  largest request body, default 4GB (keep it at least IDS_MAX_UPLOAD_MB)
+{
+	# no admin API on a network port: nothing here needs it
+	admin off
+
+	# HTTP/1.1 and HTTP/2 only; the dashboard gains nothing from HTTP/3, which needs UDP 443
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$IDS_DOMAIN} {
+	# do not announce the software in every response
+	header -Server
+
+	request_body {
+		max_size {$IDS_UPLOAD_LIMIT:4GB}
+	}
+
+	reverse_proxy ids:8000 {
+		# dataset uploads stream to disk and the live feed is a WebSocket: do not buffer either
+		flush_interval -1
+
+		transport http {
+			# a multi-gigabyte upload takes minutes
+			read_timeout 1h
+			write_timeout 1h
+		}
+	}
+}

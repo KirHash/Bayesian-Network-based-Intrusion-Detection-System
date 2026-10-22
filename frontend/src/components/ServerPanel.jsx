@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { getJSON, getToken, send, unauthorized } from "../api.js";
-import { apiUrl } from "../config.js";
+import { getJSON, send } from "../api.js";
 
 const duration = (seconds) => {
   const d = Math.floor(seconds / 86400);
@@ -84,34 +83,6 @@ export default function ServerPanel() {
     setBusy(false);
   };
 
-  const backup = async () => {
-    setError("");
-
-    const token = getToken();
-
-    const response = await fetch(apiUrl("/api/backup"), {
-      headers: token ? { Authorization: `Bearer ${token}` } : {}
-    });
-
-    if (response.status === 401) return unauthorized();
-
-    if (!response.ok) return setError(`Backup failed (${response.status}).`);
-
-    const name =
-      /filename="?([^"]+)"?/.exec(response.headers.get("content-disposition") || "")?.[1] ||
-      "ids-backup.db";
-
-    const url = URL.createObjectURL(await response.blob());
-
-    const link = document.createElement("a");
-
-    link.href = url;
-    link.download = name;
-    link.click();
-
-    URL.revokeObjectURL(url);
-  };
-
   if (!info) return null;
 
   return (
@@ -170,17 +141,7 @@ export default function ServerPanel() {
           : "Not available on this platform. See the deploy/ folder."}
       </div>
 
-      <div className="capture-actions">
-        <button className="btn small" onClick={backup}>
-          Download backup
-        </button>
-      </div>
-
-      <div className="muted small-text">
-        The backup holds alerts, accounts and settings. Saved webhook URLs and passwords are
-        encrypted with the key file next to the database (<code>.key</code>); keep that file
-        too, or they cannot be read back.
-      </div>
+      <div className="muted small-text">Backups, restore and the automatic daily copy are in the next card.</div>
 
       {error && <div className="error">{error}</div>}
     </div>

@@ -17,6 +17,7 @@ export default function UsersPanel() {
   const [users, setUsers] = useState([]);
   const [error, setError] = useState("");
   const [form, setForm] = useState({ username: "", password: "", role: "viewer" });
+  const [policy, setPolicy] = useState("off");
 
   const load = () =>
     getJSON("/api/users")
@@ -25,6 +26,10 @@ export default function UsersPanel() {
 
   useEffect(() => {
     load();
+
+    getJSON("/api/signup-policy")
+      .then((p) => setPolicy(p.mode))
+      .catch(() => {});
   }, []);
 
   const act = async (fn) => {
@@ -88,7 +93,9 @@ export default function UsersPanel() {
               <span>
                 <b>{u.username}</b>
                 {u.username === me && <span className="muted"> (you)</span>}
-                {!!u.disabled && <span className="muted"> · disabled</span>}
+                {u.two_factor && <span className="pill on">2FA</span>}
+                {u.disabled === 2 && <span className="pending-tag"> pending approval</span>}
+                {u.disabled === 1 && <span className="muted"> · disabled</span>}
               </span>
 
               <select
@@ -115,13 +122,24 @@ export default function UsersPanel() {
                 <button className="link" onClick={() => resetPassword(u.username)}>
                   password
                 </button>
+                {u.two_factor && (
+                  <button
+                    className="link"
+                    onClick={() =>
+                      window.confirm(`Turn off two-factor sign-in for ${u.username}? They can set it up again.`) &&
+                      change(u.username, { reset_two_factor: true })
+                    }
+                  >
+                    reset 2FA
+                  </button>
+                )}
                 {u.username !== me && (
                   <>
                     <button
                       className="link"
                       onClick={() => change(u.username, { disabled: !u.disabled })}
                     >
-                      {u.disabled ? "enable" : "disable"}
+                      {u.disabled === 2 ? "approve" : u.disabled ? "enable" : "disable"}
                     </button>
                     <button
                       className="link danger-text"
@@ -138,6 +156,28 @@ export default function UsersPanel() {
       </div>
 
       {error && <div className="error">{error}</div>}
+
+      {!open && (
+        <label className="signup-policy">
+          <span>
+            Self-registration
+            <em className="muted small-text"> people can request an account on the sign-in page</em>
+          </span>
+
+          <select
+            value={policy}
+            onChange={(e) =>
+              act(async () => {
+                await send("/api/signup-policy", "PUT", { mode: e.target.value });
+                setPolicy(e.target.value);
+              })
+            }
+          >
+            <option value="off">Off: admins create accounts</option>
+            <option value="approval">On: new accounts wait for approval</option>
+          </select>
+        </label>
+      )}
 
       <form className="add-user" onSubmit={add}>
         <input

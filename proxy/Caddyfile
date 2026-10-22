@@ -12,8 +12,10 @@
 #   IDS_UPLOAD_LIMIT    largest request body       default  4GB
 #                       (keep at least as large as IDS_MAX_UPLOAD_MB)
 #   IDS_AUTO_HTTPS      "disable_redirects" = do not open port 80 (right for
-#                       a local setup); set to "on" for a public site, so
-#                       http:// is redirected to https://   default  disable_redirects
+#                       a local setup); set to "ignore_loaded_certs" for a public
+#                       site (ordinary automatic HTTPS, so http:// is redirected
+#                       to https://). Caddy has no "on": it is the default, and
+#                       only these names are accepted        default  disable_redirects
 #   IDS_BIND            interfaces to listen on    default  127.0.0.1 ::1
 #                       (this machine only. Both loopback addresses, because
 #                       "localhost" tries ::1 first and on Windows a refused

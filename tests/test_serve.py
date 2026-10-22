@@ -1,4 +1,3 @@
-import asyncio
 import ssl
 import sqlite3
 import threading
@@ -40,6 +39,26 @@ def test_only_the_proxy_itself_is_believed_about_client_addresses():
     assert serve.trusted_proxies(["127.0.0.1", "10.0.0.5", "10.0.0.5"]) == ["127.0.0.1", "::1", "10.0.0.5"]
 
     assert "*" not in serve.trusted_proxies()
+
+
+def test_a_proxy_can_be_a_private_network_but_never_something_wide():
+
+    assert serve.trusted_proxies(["172.29.77.0/24"]) == ["127.0.0.1", "::1", "172.29.77.0/24"]
+
+    # a host written as a network is just that host
+    assert serve.trusted_proxies(["10.0.0.5/32"]) == ["127.0.0.1", "::1", "10.0.0.5"]
+
+    for bad in ("*", "0.0.0.0/0", "10.0.0.0/7", "::/0", "not-an-address", ""):
+        with pytest.raises(ValueError):
+            serve.trusted_proxies([bad])
+
+
+def test_a_bad_proxy_ip_stops_the_server_with_a_clear_message(capsys):
+
+    with pytest.raises(SystemExit) as stop:
+        serve.main(["--behind-proxy", "--proxy-ip", "0.0.0.0/0"])
+
+    assert "--proxy-ip" in str(stop.value) and "too wide" in str(stop.value)
 
 
 def test_local_serving_needs_nothing():
@@ -192,3 +211,16 @@ def test_the_generated_certificate_really_serves_https(tmp_path):
     finally:
         server.should_exit = True
         thread.join(10)
+
+
+def test_public_serving_needs_a_way_to_sign_in_even_on_this_machine():
+
+    message = check("127.0.0.1", {}, behind_proxy=True, has_accounts=False, public=True)
+
+    assert message and "publicly" in message and "manage_users.py" in message
+
+    assert check("127.0.0.1", {}, behind_proxy=True, has_accounts=True, public=True) is None
+    assert check("127.0.0.1", {"IDS_ADMIN_TOKEN": "t"}, behind_proxy=True, has_accounts=False, public=True) is None
+
+    # a local-only proxy without --public is still fine
+    assert check("127.0.0.1", {}, behind_proxy=True, has_accounts=False) is None
