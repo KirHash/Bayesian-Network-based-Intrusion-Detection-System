@@ -38,3 +38,4 @@ Thumbs.db
 # backups made by the server, and design-tool working files
 backups/
 .taste-skill/
+demo_pool.pkl

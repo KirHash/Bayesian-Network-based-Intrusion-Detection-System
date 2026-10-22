@@ -305,7 +305,7 @@ export function SessionsCard() {
         {sessions.map((s) => (
           <li key={s.id}>
             <span>
-              {s.client || "unknown address"}
+              {s.client || "address not recorded"}
               {s.current && <span className="pill on">this device</span>}
             </span>
             <span className="muted small-text">since {s.created_at.replace("T", " ")}</span>

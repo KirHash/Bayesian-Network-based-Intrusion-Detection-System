@@ -511,6 +511,59 @@ def require_model():
         raise HTTPException(503, NO_MODEL)
 
 
+DEMO_PER_LABEL = 15_000
+
+
+def demo_cache_path():
+    """Beside the database, so a container keeps it in its data volume."""
+
+    return Path(os.path.abspath(os.environ.get("IDS_DB", "ids.db"))).with_name("demo_pool.pkl")
+
+
+def demo_pool(pattern):
+    """The held-out flows the demo replays: up to 15,000 per label, remembered on disk.
+
+    Reading and splitting every CSV (gigabytes) takes minutes, so it is done once per set of files and the
+    small result is kept; it is made again when a file is added, removed or changed.
+    """
+
+    import pandas as pd
+
+    files = sorted(glob.glob(pattern))
+
+    stamp = hashlib.sha256(
+        "|".join(f"{os.path.basename(f)}:{os.path.getsize(f)}:{int(os.path.getmtime(f))}" for f in files).encode()
+    ).hexdigest()
+
+    cache = demo_cache_path()
+
+    try:
+        saved = pd.read_pickle(cache)
+
+        if saved.get("stamp") == stamp:
+            return saved["pool"]
+    except Exception:
+        pass
+
+    pool = train_val_test_split(load_all(pattern))[2]
+
+    column = next((c for c in ("Label", "label") if c in pool.columns), None)
+
+    if column:
+        pool = pd.concat(
+            [part.sample(min(len(part), DEMO_PER_LABEL), random_state=0) for _, part in pool.groupby(column)]
+        )
+
+    pool = pool.sample(frac=1, random_state=0).reset_index(drop=True)
+
+    try:
+        pd.to_pickle({"stamp": stamp, "pool": pool}, cache)
+    except OSError as error:
+        log.warning("could not keep the demo flows (%s); the next start will rebuild them", error)
+
+    return pool
+
+
 async def load_demo():
     """Load the held-out dataset flows used by the demo, once, on demand."""
 
@@ -526,7 +579,7 @@ async def load_demo():
             )
 
         def load():
-            return train_val_test_split(load_all(demo_data_glob()))[2]
+            return demo_pool(demo_data_glob())
 
         pool = await asyncio.to_thread(load)
 

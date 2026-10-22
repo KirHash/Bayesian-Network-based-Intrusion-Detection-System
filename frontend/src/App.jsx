@@ -180,7 +180,7 @@ export default function App() {
           )}
         </main>
 
-        <ServerNote />
+        {auth.isAdmin && page === "operations" && <ServerNote />}
       </div>
 
       <AlertDrawer

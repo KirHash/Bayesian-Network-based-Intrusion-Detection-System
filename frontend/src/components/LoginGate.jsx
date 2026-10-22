@@ -217,7 +217,7 @@ export default function LoginGate({ children }) {
           {useToken ? "Use username and password" : "Use the admin token instead"}
         </button>
       ) : (
-        <span>{mode === "login" ? "Sessions end after 12 hours" : "Passwords are stored as salted scrypt hashes"}</span>
+        <span>{mode === "login" ? "Sessions end after 12 hours" : ""}</span>
       );
 
     return (
