@@ -4,7 +4,7 @@
 # image carries the trained model, not the dataset.
 
 # -- dashboard ---------------------------------------------------------------
-FROM node:22-slim AS frontend
+FROM node:25-slim AS frontend
 
 WORKDIR /build
 
