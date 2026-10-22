@@ -3,7 +3,7 @@
 # Only load a bayesian_ids.pkl you trained yourself: pickle runs code.
 # The trained model is a pickle: it only loads cleanly (and safely) with the library versions that
 # made it, so these five are pinned exactly. After upgrading them, retrain (Operations -> Model).
-numpy==2.3.4
+numpy==2.5.4
 pandas==2.3.3
 scipy==1.17.1
 scikit-learn==1.9.0
