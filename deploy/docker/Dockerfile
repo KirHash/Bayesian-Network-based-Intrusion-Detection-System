@@ -15,7 +15,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # -- server --------------------------------------------------------------------
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 # CAPTURE=true (the default) lets python sniff packets, which needs NET_RAW and NET_ADMIN when the
 # container runs (see docker-compose.yml here). A server that only takes uploads and API input
